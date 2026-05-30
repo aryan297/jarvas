@@ -2,7 +2,6 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/authStore'
 import Layout from '@/components/layout/Layout'
 import LoginPage from '@/pages/auth/LoginPage'
-import RegisterPage from '@/pages/auth/RegisterPage'
 import DashboardPage from '@/pages/dashboard/DashboardPage'
 import ChatPage from '@/pages/chat/ChatPage'
 import DocumentsPage from '@/pages/documents/DocumentsPage'
@@ -24,9 +23,9 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
 export default function App() {
   return (
     <Routes>
-      {/* Public routes */}
+      {/* Public routes — /register redirects to /login which has a built-in Register tab */}
       <Route path="/login"    element={<PublicRoute><LoginPage /></PublicRoute>} />
-      <Route path="/register" element={<PublicRoute><RegisterPage /></PublicRoute>} />
+      <Route path="/register" element={<Navigate to="/login" replace />} />
 
       {/* Protected routes */}
       <Route path="/" element={<PrivateRoute><Layout /></PrivateRoute>}>
