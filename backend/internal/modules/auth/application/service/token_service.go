@@ -15,9 +15,10 @@ import (
 
 // Claims is the JWT payload. Sub is always the user UUID string.
 type Claims struct {
-	UserID string          `json:"sub"`
-	Email  string          `json:"email"`
-	Role   entity.UserRole `json:"role"`
+	UserID   string          `json:"sub"`
+	Email    string          `json:"email"`
+	FullName string          `json:"name"`
+	Role     entity.UserRole `json:"role"`
 	jwt.RegisteredClaims
 }
 
@@ -40,9 +41,10 @@ func NewTokenService(cfg config.JWTConfig) *TokenService {
 func (s *TokenService) GenerateAccessToken(user *entity.User) (string, error) {
 	now := time.Now().UTC()
 	claims := Claims{
-		UserID: user.ID.String(),
-		Email:  user.Email,
-		Role:   user.Role,
+		UserID:   user.ID.String(),
+		Email:    user.Email,
+		FullName: user.FullName,
+		Role:     user.Role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   user.ID.String(),
 			IssuedAt:  jwt.NewNumericDate(now),

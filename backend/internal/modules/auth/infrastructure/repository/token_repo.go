@@ -32,7 +32,8 @@ func (r *pgTokenRepository) Save(ctx context.Context, t *entity.RefreshToken) er
 
 
 func (r *pgTokenRepository) FindByHash(ctx context.Context, hash string) (*entity.RefreshToken, error) {
-	q := `SELECT id, user_id, token_hash, ip_address, user_agent,
+	// Cast ip_address::text — pgx v5 cannot scan INET directly into *string.
+	q := `SELECT id, user_id, token_hash, ip_address::text, user_agent,
 	             revoked, expires_at, created_at
 	      FROM refresh_tokens WHERE token_hash = $1`
 	row := r.db.QueryRow(ctx, q, hash)

@@ -226,16 +226,16 @@ func (h *AuthHandler) GoogleCallback(c *gin.Context) {
 // @Failure     401 {object} response.errorBody
 // @Router      /auth/me [get]
 func (h *AuthHandler) Me(c *gin.Context) {
-	// Middleware sets user_id, user_email, user_role — not a "user" object.
 	userID, exists := c.Get("user_id")
 	if !exists {
 		response.Error(c, apperrors.Unauthorized("not authenticated"))
 		return
 	}
 	response.OK(c, dto.UserResponse{
-		ID:    userID.(string),
-		Email: c.GetString("user_email"),
-		Role:  string(c.MustGet("user_role").(entity.UserRole)),
+		ID:       userID.(string),
+		Email:    c.GetString("user_email"),
+		FullName: c.GetString("user_name"),
+		Role:     string(c.MustGet("user_role").(entity.UserRole)),
 	})
 }
 
