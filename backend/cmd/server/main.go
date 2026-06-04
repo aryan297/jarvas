@@ -11,10 +11,32 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/jarvas/backend/internal/modules/auth/application/service"
-	authinfrarepo "github.com/jarvas/backend/internal/modules/auth/infrastructure/repository"
+
+	// Auth
+	authhttp      "github.com/jarvas/backend/internal/modules/auth/delivery/http"
 	"github.com/jarvas/backend/internal/modules/auth/infrastructure/oauth"
-	authhttp "github.com/jarvas/backend/internal/modules/auth/delivery/http"
+	authinfrarepo "github.com/jarvas/backend/internal/modules/auth/infrastructure/repository"
+	authsvc       "github.com/jarvas/backend/internal/modules/auth/application/service"
+
+	// Chat
+	chathttp "github.com/jarvas/backend/internal/modules/chat/delivery/http"
+	chatrepo "github.com/jarvas/backend/internal/modules/chat/infrastructure/repository"
+	chatsvc  "github.com/jarvas/backend/internal/modules/chat/application/service"
+
+	// Document
+	dochttp    "github.com/jarvas/backend/internal/modules/document/delivery/http"
+	docrepo    "github.com/jarvas/backend/internal/modules/document/infrastructure/repository"
+	docstorage "github.com/jarvas/backend/internal/modules/document/infrastructure/storage"
+	docsvc     "github.com/jarvas/backend/internal/modules/document/application/service"
+	docevent   "github.com/jarvas/backend/internal/modules/document/domain/event"
+
+	// RAG
+	raghttp    "github.com/jarvas/backend/internal/modules/rag/delivery/http"
+	ragembedding "github.com/jarvas/backend/internal/modules/rag/infrastructure/embedding"
+	ragvector  "github.com/jarvas/backend/internal/modules/rag/infrastructure/vectorstore"
+	ragsvc     "github.com/jarvas/backend/internal/modules/rag/application/service"
+
+	// Shared
 	"github.com/jarvas/backend/internal/shared/cache"
 	"github.com/jarvas/backend/internal/shared/config"
 	"github.com/jarvas/backend/internal/shared/database"
@@ -33,9 +55,9 @@ func main() {
 	logger.Init(cfg.App.Env)
 	defer logger.Sync()
 
-	// ── Infrastructure ────────────────────────────────────────────────────────
-
 	ctx := context.Background()
+
+	// ── Infrastructure ────────────────────────────────────────────────────────
 
 	db, err := database.NewPostgresPool(ctx, cfg.DB)
 	if err != nil {
@@ -51,14 +73,73 @@ func main() {
 
 	bus := eventbus.New()
 
-	// ── Module: Auth ─────────────────────────────────────────────────────────
+	// ── Module: Auth ──────────────────────────────────────────────────────────
 
-	userRepo  := authinfrarepo.NewUserRepository(db.Pool)
-	tokenRepo := authinfrarepo.NewTokenRepository(db.Pool)
-	tokenSvc  := service.NewTokenService(cfg.JWT)
-	authSvc   := service.NewAuthService(userRepo, tokenRepo, tokenSvc, bus)
+	userRepo       := authinfrarepo.NewUserRepository(db.Pool)
+	tokenRepo      := authinfrarepo.NewTokenRepository(db.Pool)
+	tokenSvc       := authsvc.NewTokenService(cfg.JWT)
+	authService    := authsvc.NewAuthService(userRepo, tokenRepo, tokenSvc, bus)
 	googleProvider := oauth.NewGoogleProvider(cfg.Google)
-	authHandler    := authhttp.NewAuthHandler(authSvc, googleProvider, redisClient)
+	authHandler    := authhttp.NewAuthHandler(authService, googleProvider, redisClient)
+
+	// ── Module: Chat ──────────────────────────────────────────────────────────
+
+	convRepo    := chatrepo.NewConversationRepository(db.Pool)
+	msgRepo     := chatrepo.NewMessageRepository(db.Pool)
+	chatService := chatsvc.NewChatService(convRepo, msgRepo, redisClient, bus, chatsvc.ChatConfig{
+		OpenAIKey: cfg.AI.OpenAIKey,
+		Model:     cfg.AI.Model,
+		MaxTokens: 4096,
+	})
+	chatHandler := chathttp.NewChatHandler(chatService)
+
+	// ── Module: Document + RAG ────────────────────────────────────────────────
+
+	minioStorage, err := docstorage.NewMinIOStorage(cfg.MinIO)
+	if err != nil {
+		logger.Fatal("minio connection failed", zap.Error(err))
+	}
+
+	qdrantStore, err := ragvector.NewQdrantStore(cfg.Qdrant.Host, cfg.Qdrant.Port, cfg.Qdrant.APIKey)
+	if err != nil {
+		logger.Fatal("qdrant connection failed", zap.Error(err))
+	}
+
+	embedder := ragembedding.NewOpenAIEmbedder(cfg.AI.OpenAIKey, cfg.AI.EmbeddingModel)
+
+	docRepository   := docrepo.NewDocumentRepository(db.Pool)
+	chunkRepository := docrepo.NewChunkRepository(db.Pool)
+
+	processor := ragsvc.NewProcessor(docRepository, chunkRepository, minioStorage, embedder, qdrantStore, bus)
+
+	// Ensure Qdrant collections exist.
+	if err := processor.EnsureCollection(ctx); err != nil {
+		logger.Fatal("qdrant ensure collection failed", zap.Error(err))
+	}
+
+	documentService := docsvc.NewDocumentService(docRepository, chunkRepository, minioStorage, bus)
+	documentHandler := dochttp.NewDocumentHandler(documentService)
+
+	ragService := ragsvc.NewRAGService(embedder, qdrantStore)
+	ragHandler  := raghttp.NewRAGHandler(ragService)
+
+	// ── Event subscriptions ───────────────────────────────────────────────────
+
+	// DocumentUploaded → trigger async RAG processing
+	bus.Subscribe(docevent.EvtDocumentUploaded, func(ctx context.Context, e eventbus.Event) {
+		evt := e.(docevent.DocumentUploaded)
+		go processor.ProcessDocument(ctx, evt.DocumentID, evt.UserID)
+	})
+
+	// DocumentDeleted → clean up Qdrant vectors
+	bus.Subscribe(docevent.EvtDocumentDeleted, func(ctx context.Context, e eventbus.Event) {
+		evt := e.(docevent.DocumentDeleted)
+		go func() {
+			_ = qdrantStore.DeleteByFilter(ctx, ragsvc.CollectionDocuments, map[string]string{
+				"document_id": evt.DocumentID.String(),
+			})
+		}()
+	})
 
 	// ── Middleware ────────────────────────────────────────────────────────────
 
@@ -82,7 +163,7 @@ func main() {
 		MaxAge:           12 * time.Hour,
 	}))
 
-	// ── Health check ──────────────────────────────────────────────────────────
+	// ── Routes ────────────────────────────────────────────────────────────────
 
 	router.GET("/health", func(c *gin.Context) {
 		if err := db.Ping(c.Request.Context()); err != nil {
@@ -92,29 +173,19 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "healthy", "service": cfg.App.Name})
 	})
 
-	// ── API v1 ────────────────────────────────────────────────────────────────
-
 	v1 := router.Group("/api/v1")
 	authhttp.RegisterRoutes(v1, authHandler, authMW)
+	chathttp.RegisterRoutes(v1, chatHandler, authMW)
+	dochttp.RegisterRoutes(v1, documentHandler, authMW)
+	raghttp.RegisterRoutes(v1, ragHandler, authMW)
 
-	// Additional module routes are registered here as they are implemented:
-	// userhttp.RegisterRoutes(v1, userHandler, authMW)
-	// chathttp.RegisterRoutes(v1, chatHandler, authMW)
-	// documenthttp.RegisterRoutes(v1, documentHandler, authMW)
-	// raghttp.RegisterRoutes(v1, ragHandler, authMW)
-	// memoryhttp.RegisterRoutes(v1, memoryHandler, authMW)
-	// agenthttp.RegisterRoutes(v1, agentHandler, authMW)
-	// workflowhttp.RegisterRoutes(v1, workflowHandler, authMW)
-	// toolhttp.RegisterRoutes(v1, toolHandler, authMW)
-	// voicehttp.RegisterRoutes(v1, voiceHandler, authMW)
-
-	// ── HTTP Server with graceful shutdown ────────────────────────────────────
+	// ── HTTP Server ───────────────────────────────────────────────────────────
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.App.Port,
 		Handler:      router,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 
@@ -130,7 +201,6 @@ func main() {
 	<-quit
 
 	logger.Info("shutdown signal received")
-
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -139,7 +209,4 @@ func main() {
 	} else {
 		logger.Info("server stopped cleanly")
 	}
-
-	// Suppress unused variable warning for bus — it will be used by event subscribers.
-	_ = bus
 }

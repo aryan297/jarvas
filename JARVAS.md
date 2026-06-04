@@ -181,31 +181,51 @@ jarvas/
 │           │   ├── domain/entity/user_profile.go
 │           │   └── application/dto/user_dto.go
 │           │
-│           ├── chat/                # 🔲 Domain + DTO only
+│           ├── chat/                # ✅ FULLY IMPLEMENTED (Phase 2)
 │           │   ├── domain/entity/conversation.go
-│           │   └── application/dto/chat_dto.go
+│           │   ├── application/dto/chat_dto.go
+│           │   ├── application/port/repository.go
+│           │   ├── application/service/chat_service.go   # SendMessage, StreamMessage, Redis memory
+│           │   ├── infrastructure/repository/conversation_repo.go
+│           │   ├── infrastructure/repository/message_repo.go
+│           │   └── delivery/http/handler.go + routes.go
 │           │
-│           ├── agent/               # 🔲 Domain + DTO only
+│           ├── document/            # ✅ FULLY IMPLEMENTED (Phase 3)
+│           │   ├── domain/entity/document.go
+│           │   ├── domain/event/events.go                # DocumentUploaded, Indexed, Deleted
+│           │   ├── application/dto/document_dto.go
+│           │   ├── application/port/ports.go
+│           │   ├── application/service/document_service.go
+│           │   ├── infrastructure/storage/minio.go
+│           │   ├── infrastructure/extractor/extractor.go  # PDF + PlainText
+│           │   ├── infrastructure/repository/document_repo.go
+│           │   ├── infrastructure/repository/chunk_repo.go
+│           │   └── delivery/http/handler.go + routes.go
+│           │
+│           ├── rag/                 # ✅ FULLY IMPLEMENTED (Phase 3)
+│           │   ├── domain/entity/rag.go
+│           │   ├── application/port/ports.go              # EmbeddingPort, VectorStorePort
+│           │   ├── application/service/chunker.go         # 512-token sentence-aware chunks
+│           │   ├── application/service/processor.go       # Full async indexing pipeline
+│           │   ├── application/service/rag_service.go     # Search → rerank → context
+│           │   ├── infrastructure/embedding/openai.go     # text-embedding-3-small
+│           │   ├── infrastructure/vectorstore/qdrant.go   # gRPC: upsert, search, delete
+│           │   └── delivery/http/handler.go + routes.go
+│           │
+│           ├── agent/               # 🔲 Domain + DTO only (Phase 5)
 │           │   ├── domain/entity/agent.go
 │           │   └── application/dto/agent_dto.go
 │           │
-│           ├── document/            # 🔲 Domain + DTO only
-│           │   ├── domain/entity/document.go
-│           │   └── application/dto/document_dto.go
-│           │
-│           ├── memory/              # 🔲 Domain only
+│           ├── memory/              # 🔲 Domain only (Phase 4 — NEXT)
 │           │   └── domain/entity/memory.go
 │           │
-│           ├── rag/                 # 🔲 Domain only
-│           │   └── domain/entity/rag.go
-│           │
-│           ├── workflow/            # 🔲 Domain only
+│           ├── workflow/            # 🔲 Domain only (Phase 7)
 │           │   └── domain/entity/workflow.go
 │           │
-│           ├── tool/                # 🔲 Domain only
+│           ├── tool/                # 🔲 Domain only (Phase 7)
 │           │   └── domain/entity/tool.go
 │           │
-│           └── voice/               # 🔲 Domain only
+│           └── voice/               # 🔲 Domain only (Phase 6)
 │               └── domain/entity/voice.go
 │
 └── frontend/
@@ -219,11 +239,16 @@ jarvas/
         ├── main.tsx                 # App bootstrap: QueryClient, Router, Toaster
         ├── App.tsx                  # Route tree with PrivateRoute / PublicRoute guards
         ├── index.css                # Tailwind + CSS variables (light/dark)
+        ├── vite-env.d.ts            # Vite ImportMeta type declarations
         ├── types/api.ts             # All API response types
         ├── store/authStore.ts       # Zustand: user, accessToken, isAuthenticated
         ├── services/
         │   ├── api.ts               # Axios client: auto Bearer header + silent refresh
-        │   └── auth.service.ts      # register, login, logout, refresh, me, googleUrl
+        │   ├── auth.service.ts      # register, login, logout, refresh, me, googleUrl
+        │   ├── chat.service.ts      # conversations, messages, SSE streaming   ✅ Phase 2
+        │   └── document.service.ts  # upload, list, delete, presign, RAG search ✅ Phase 3
+        ├── hooks/
+        │   └── useConversations.ts  # React Query hooks for chat              ✅ Phase 2
         ├── components/
         │   └── layout/
         │       ├── Layout.tsx       # Shell: Sidebar + Header + <Outlet>
@@ -231,14 +256,22 @@ jarvas/
         │       └── Header.tsx       # User avatar + logout button
         └── pages/
             ├── auth/
-            │   ├── LoginPage.tsx    # Email/pass form + Google OAuth button
-            │   └── RegisterPage.tsx
-            ├── dashboard/DashboardPage.tsx   # stub
-            ├── chat/ChatPage.tsx             # stub
-            ├── documents/DocumentsPage.tsx   # stub
-            ├── agents/AgentsPage.tsx         # stub
-            ├── memory/MemoryPage.tsx         # stub
-            ├── workflows/WorkflowsPage.tsx   # stub
+            │   └── LoginPage.tsx    # Tabbed: Sign in + Create account + Google OAuth ✅
+            ├── chat/
+            │   ├── ChatPage.tsx           # Split layout: list + thread           ✅ Phase 2
+            │   ├── ConversationList.tsx   # New/delete, timestamps                ✅ Phase 2
+            │   ├── MessageThread.tsx      # Optimistic UI, streaming, auto-scroll ✅ Phase 2
+            │   ├── MessageBubble.tsx      # Markdown + streaming cursor ▍        ✅ Phase 2
+            │   └── ChatInput.tsx          # Textarea, stream toggle, Enter=send  ✅ Phase 2
+            ├── documents/
+            │   ├── DocumentsPage.tsx      # Tabbed: My Docs + Search Knowledge   ✅ Phase 3
+            │   ├── UploadDropzone.tsx     # react-dropzone, 50 MB                ✅ Phase 3
+            │   ├── DocumentCard.tsx       # Status badge, chunk count, actions   ✅ Phase 3
+            │   └── DocumentSearch.tsx     # Semantic search with ranked results   ✅ Phase 3
+            ├── dashboard/DashboardPage.tsx   # stub (Phase 8)
+            ├── agents/AgentsPage.tsx         # stub (Phase 5)
+            ├── memory/MemoryPage.tsx         # stub (Phase 4)
+            ├── workflows/WorkflowsPage.tsx   # stub (Phase 7)
             └── settings/SettingsPage.tsx     # stub
 ```
 
@@ -470,70 +503,69 @@ Copy `.env.example` → `.env` and fill in these values:
 
 ## 8. What Is Already Built
 
+**48 backend module files · 30 frontend files · 0 build errors · 0 TypeScript errors**
+
+### ✅ Phase 1 — Auth (100% complete, all 11 scenarios verified)
+
+| Layer | Files |
+|-------|-------|
+| Domain | `user.go`, `refresh_token.go`, `events.go` (UserRegistered, UserLoggedIn) |
+| Port | `UserRepository`, `TokenRepository` interfaces |
+| Service | `auth_service.go` (Register/Login/Refresh/Logout/OAuth), `token_service.go` (JWT + SHA-256) |
+| Infra | `user_repo.go`, `token_repo.go`, `oauth/google.go` |
+| Delivery | 7 endpoints: register, login, refresh, logout, /me, google/login, google/callback |
+| Frontend | Tabbed LoginPage (sign in + create account + Google), route guards, Zustand auth store |
+
+### ✅ Phase 2 — Chat (100% complete)
+
+| Layer | Files |
+|-------|-------|
+| Port | `ConversationRepository`, `MessageRepository` interfaces |
+| Service | `chat_service.go` — SendMessage, StreamMessage, Redis short-term memory (last 20, TTL 2h) |
+| Infra | `conversation_repo.go`, `message_repo.go` |
+| Delivery | 6 endpoints including SSE streaming (`stream: true`) |
+| Frontend | `ChatPage`, `ConversationList`, `MessageThread`, `MessageBubble` (Markdown), `ChatInput` (stream toggle) |
+
+### ✅ Phase 3 — Documents + RAG (100% complete)
+
+| Layer | Files |
+|-------|-------|
+| Domain events | `DocumentUploaded`, `DocumentIndexed`, `DocumentDeleted` |
+| Ports | `DocumentRepository`, `ChunkRepository`, `StoragePort`, `EmbeddingPort`, `VectorStorePort` |
+| MinIO | Upload, download, delete, 24h presigned URL |
+| Extractors | PDF (ledongthuc/pdf) + PlainText (TXT/MD/CSV/HTML) |
+| Chunker | 512-token sentence-aware chunks, 50-token overlap |
+| Processor | Async: download→extract→chunk→embed(batch 100)→Postgres+Qdrant (event-driven) |
+| RAG search | Embed query→ANN→rerank top-5→context string for LLM |
+| Qdrant | gRPC: EnsureCollection, Upsert, Search with user_id filter, DeleteByFilter |
+| Embedder | text-embedding-3-small via OpenAI SDK (EmbedText + EmbedBatch) |
+| Repos | Document CRUD + chunk batch insert (transaction) |
+| Delivery | 6 document endpoints + 1 RAG search endpoint |
+| Frontend | `DocumentsPage` (tabbed), `UploadDropzone` (react-dropzone), `DocumentCard` (status badge + poll), `DocumentSearch` (ranked results) |
+
 ### ✅ Shared Infrastructure
 
-| File | What It Does |
-|------|-------------|
-| `shared/config/config.go` | Loads typed config from `.env`. Provides `DSN()` and `Addr()` helpers. |
-| `shared/database/postgres.go` | pgxpool with health check on startup, configurable conn limits. |
-| `shared/cache/redis.go` | Redis client: `Set`, `Get`, `Del`, `SetString`, `GetString`, `Exists`, `Expire`. |
-| `shared/logger/logger.go` | Zap: colored output in dev, JSON in production. Global `Info/Error/Warn/Debug/Fatal`. |
-| `shared/errors/errors.go` | `AppError{HTTPStatus, Code, Message, Err}` with `BadRequest`, `Unauthorized`, `NotFound`, etc. |
-| `shared/response/response.go` | `OK`, `Created`, `Paginated`, `NoContent`, `Error` — all use `AppError` chain. |
-| `shared/validator/validator.go` | `Validate(struct)` → human-readable `AppError` from `validate` struct tags. |
-| `shared/eventbus/eventbus.go` | In-process pub/sub. `Publish` = goroutine per handler. `PublishSync` = sequential. |
-| `shared/middleware/auth.go` | `Authenticate()` injects `user_id`, `user_email`, `user_role` into Gin context. `RequireRole()` enforces RBAC. |
-| `shared/middleware/logger.go` | Logs method, path, status, latency, IP per request. |
-| `shared/middleware/recovery.go` | Catches panics, logs stack, returns 500. |
+| Package | What It Does |
+|---------|-------------|
+| `config` | Typed env config, searches `.env` and `../.env` |
+| `database` | pgxpool with health check, configurable limits |
+| `cache` | Redis typed helpers: Get/Set/Del/Exists/Expire |
+| `logger` | Zap: colored dev, JSON prod; logs 5xx causes |
+| `errors` | `AppError{HTTPStatus, Code, Message, Err}` — full chain |
+| `response` | OK/Created/Paginated/NoContent/Error (auto-unwraps AppError) |
+| `validator` | Struct tags → human-readable AppError messages |
+| `eventbus` | In-process goroutine pub/sub, panic-safe, swap-ready for NATS |
+| `middleware` | Authenticate, RequireRole, RequestLogger, Recovery |
 
-### ✅ Auth Module (Complete)
+### ✅ Domain Skeletons (future phases)
 
-| File | What It Does |
-|------|-------------|
-| `auth/domain/entity/user.go` | `User` aggregate with `NewUser()`, `NewOAuthUser()`, `CanLogin()`, `IsAdmin()`. |
-| `auth/domain/entity/refresh_token.go` | `RefreshToken` with `IsValid()` guard. |
-| `auth/domain/event/events.go` | `UserRegistered`, `UserLoggedIn`, `UserLoggedOut` events. |
-| `auth/application/port/repository.go` | `UserRepository` + `TokenRepository` interfaces. |
-| `auth/application/service/token_service.go` | JWT sign/verify, refresh token generation, SHA-256 hashing. |
-| `auth/application/service/auth_service.go` | `Register`, `Login`, `RefreshTokens`, `Logout`, `HandleOAuthUser`. |
-| `auth/infrastructure/repository/user_repo.go` | pgx impl of `UserRepository`. |
-| `auth/infrastructure/repository/token_repo.go` | pgx impl of `TokenRepository`. |
-| `auth/infrastructure/oauth/google.go` | OAuth2 flow: `AuthCodeURL()` + `ExchangeCode()` → `GoogleUserInfo`. |
-| `auth/delivery/http/handler.go` | Gin handlers for all 7 auth endpoints. |
-| `auth/delivery/http/routes.go` | Route mounting with middleware. |
-
-### ✅ Domain Layers (All Modules)
-
-All 10 modules have their domain entities and DTOs defined:
-
-| Module | Entity | Key Fields |
-|--------|--------|-----------|
-| `user` | `UserProfile` | Bio, Preferences, SubscriptionPlan |
-| `chat` | `Conversation`, `Message` | Role (USER/ASSISTANT/SYSTEM/TOOL), SSE streaming DTO |
-| `agent` | `Agent` | Type, SystemPrompt, Model, ToolsEnabled, RAGEnabled |
-| `document` | `Document`, `DocumentChunk` | StorageKey, Status pipeline, QdrantID link |
-| `memory` | `Memory` | Type (FACT/PREF/EVENT/SKILL/REL), Importance, semantic link |
-| `rag` | `RetrievedChunk`, `RAGContext`, `SearchQuery` | Score, RerankScore, TopK |
-| `workflow` | `Workflow`, `WorkflowRun`, `WorkflowDefinition` | DAG nodes/edges, TriggerConfig |
-| `tool` | `Tool`, `UserToolConfig`, `Executor` interface | Pluggable executor pattern |
-| `voice` | `VoiceSession` | AudioStorageKey, TranscriptionStatus |
-
-### ✅ Frontend Shell
-
-- React Router with `PrivateRoute` / `PublicRoute` guards
-- Zustand auth store (persisted to localStorage, token in memory only)
-- Axios client with auto Bearer token injection + silent 401 refresh
-- Sidebar with 7 nav links, Header with user avatar + logout
-- Login page (email/pass + Google OAuth redirect button)
-- Register page
-- Stubs for: Dashboard, Chat, Documents, Agents, Memory, Workflows, Settings
+`user`, `agent`, `memory`, `workflow`, `tool`, `voice` — entities + DTOs defined, services pending.
 
 ### ✅ Infrastructure
 
-- `docker-compose.yml` — all 6 services with health checks and dependency ordering
-- `backend/Dockerfile` — multi-stage build, final image from `scratch` (~8MB)
-- `frontend/Dockerfile.dev` — hot-reload dev image
-- `Makefile` — 20+ commands for dev, test, build, docker, migrate
+- `docker-compose.yml` — Postgres, Redis, Qdrant, MinIO, Backend, Frontend (health checks)
+- `backend/Dockerfile` — multi-stage, final image from `scratch` (~8 MB)
+- `Makefile` — `make dev` auto-starts Docker infra, detects air, falls back to `go run`
 
 ---
 
@@ -627,9 +659,9 @@ Base URL: `http://localhost:8080/api/v1`
 | Phase | What You Build | Status |
 |-------|---------------|--------|
 | **1** | Auth (JWT, Google OAuth, RBAC) | ✅ Done |
-| **2** | Chat (conversations, messages, SSE streaming) | 🔲 Next |
-| **3** | RAG + Document Upload (chunking, embedding, Qdrant, reranking) | 🔲 |
-| **4** | Memory (short-term Redis, long-term Postgres, semantic Qdrant) | 🔲 |
+| **2** | Chat (conversations, messages, SSE streaming) | ✅ Done |
+| **3** | Documents + RAG (chunking, embedding, Qdrant, search) | ✅ Done |
+| **4** | Memory (short-term Redis, long-term Postgres, semantic Qdrant) | **▶ Next** |
 | **5** | AI Agents (Eino graph, supervisor + sub-agents) | 🔲 |
 | **6** | Voice (audio upload, Whisper transcription) | 🔲 |
 | **7** | Workflows (DAG engine, triggers, tool execution) | 🔲 |

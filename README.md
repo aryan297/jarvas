@@ -5,191 +5,91 @@ Modular Monolith, with a clear extraction path to microservices.
 
 ---
 
+## Build Status
+
+| Phase | Feature            | Status       |
+|-------|--------------------|--------------|
+| 1     | Auth               | ✅ **Done**  |
+| 2     | Chat + Streaming   | ✅ **Done**  |
+| 3     | Documents + RAG    | ✅ **Done**  |
+| 4     | Memory             | ▶ **Next**  |
+| 5     | AI Agents (Eino)   | 🔲 Pending  |
+| 6     | Voice              | 🔲 Pending  |
+| 7     | Workflows + Tools  | 🔲 Pending  |
+| 8     | Multi-Tenant       | 🔲 Pending  |
+
+**48 backend module files · 30 frontend files · 0 build errors**
+
+---
+
 ## Tech Stack
 
-| Layer      | Technology               | Why                                                       |
-|------------|--------------------------|-----------------------------------------------------------|
-| Backend    | Go 1.24 + Gin            | Low latency, small memory footprint, excellent concurrency |
-| AI         | Eino (CloudWeGo)         | Production-ready Go LLM orchestration, graph-based agents |
-| Database   | PostgreSQL 16            | ACID, JSONB, full-text, partitioning, future sharding     |
-| Cache      | Redis 7                  | Short-term memory, session state, OAuth CSRF tokens       |
-| VectorDB   | Qdrant                   | High-perf ANN search, payload filtering, gRPC API         |
-| Storage    | MinIO                    | S3-compatible, on-prem, presigned URLs                    |
-| Auth       | JWT + Google OAuth       | Stateless access tokens, rotating refresh tokens          |
-| Frontend   | React 18 + Vite + TS     | Fast HMR, type-safe, Tailwind for UI                      |
-| Deploy     | Docker Compose → K8s     | Start simple, extract when needed                         |
+| Layer        | Technology               | Why                                                        |
+|--------------|--------------------------|------------------------------------------------------------|
+| Backend      | Go 1.24 + Gin            | ~10x lower memory than Node. Goroutines are free.          |
+| AI           | Eino (CloudWeGo)         | Production Go LLM orchestration, graph-based agents        |
+| Database     | PostgreSQL 16            | ACID, JSONB, partitioning, full-text search                |
+| Cache        | Redis 7                  | Short-term memory, refresh token store, OAuth CSRF state   |
+| Vector DB    | Qdrant                   | Fast ANN search, payload filtering for tenant isolation    |
+| Object Store | MinIO                    | S3-compatible, presigned URLs, self-hosted                 |
+| Auth         | JWT + Google OAuth       | Stateless access (15 min) + rotating refresh (7 day)       |
+| Frontend     | React 18 + Vite + TS     | Instant HMR, type-safe, Tailwind                           |
+| Deploy       | Docker Compose → K8s     | Start simple, extract modules when traffic demands it      |
 
 ---
 
 ## Architecture
 
-### Modular Monolith with Clean Architecture
+### Modular Monolith + Clean Architecture
 
 ```
-backend/
-├── cmd/server/            # Entrypoint, DI wiring
-└── internal/
-    ├── shared/            # Cross-cutting: config, db, cache, eventbus, middleware
-    └── modules/
-        ├── auth/          # JWT, Google OAuth, RBAC
-        ├── user/          # Profile, preferences
-        ├── chat/          # Conversations, messages, streaming
-        ├── agent/         # Agent definitions, Eino orchestration
-        ├── memory/        # Short/long/semantic memory
-        ├── rag/           # Chunking, embedding, retrieval, reranking
-        ├── document/      # Upload, MinIO, processing pipeline
-        ├── workflow/      # DAG engine, triggers, runs
-        ├── tool/          # Tool registry, pluggable executors
-        └── voice/         # Audio upload, Whisper transcription
+backend/internal/modules/
+├── auth/      ✅  JWT, Google OAuth, RBAC, refresh token rotation
+├── chat/      ✅  Conversations, messages, SSE streaming, Redis memory
+├── document/  ✅  Upload → MinIO → async RAG indexing pipeline
+├── rag/       ✅  Chunk → embed → Qdrant → rerank → context string
+├── memory/    🔲  Short-term (Redis) + long-term (Postgres + Qdrant)
+├── agent/     🔲  Eino graph: supervisor + research/coding/planning
+├── voice/     🔲  Audio → Whisper transcription → chat injection
+├── workflow/  🔲  DAG engine, cron triggers, tool execution
+└── tool/      🔲  Pluggable tool registry (HTTP, DB, GitHub, Calendar)
 ```
 
-Each module follows **Clean Architecture**:
-```
-module/
-├── domain/
-│   ├── entity/     # Aggregates, entities, value objects (no imports from infra)
-│   └── event/      # Domain events published to the internal event bus
-├── application/
-│   ├── dto/        # Request/response data transfer objects
-│   ├── port/       # Repository & service interfaces (contracts)
-│   └── service/    # Business logic (depends only on ports)
-├── infrastructure/
-│   ├── repository/ # pgx implementations of port interfaces
-│   └── ...         # OAuth clients, MinIO adapters, Qdrant clients
-└── delivery/
-    └── http/       # Gin handlers and route registration
-```
+Every module: `domain/ → application/ → infrastructure/ → delivery/`
 
-**Why this layout?**
-- `domain` has zero external imports → portable across any infra change
-- `application/service` is 100% testable without a database
-- `delivery` is swappable: add gRPC, WebSocket, or CLI delivery alongside HTTP
-- Future microservice extraction = move one module folder + its DB tables
-
----
-
-## RAG Architecture
+### RAG Pipeline (Live)
 
 ```
-Upload Document
-  → MinIO (raw file storage)
-  → Processing pipeline (background worker)
-  → Chunking (fixed-size + semantic sentence boundaries)
-  → Embedding (OpenAI text-embedding-3-small, 1536 dims)
-  → Qdrant (vector upsert with user_id payload filter)
-  → PostgreSQL (chunk metadata + document status update)
-  → Event: EmbeddingCreated → audit log
+POST /documents (multipart)
+  → MinIO upload
+  → bus.Publish(DocumentUploaded)   ← responds 201 here
+  → background goroutine
+      → extract text (PDF/TXT/MD/CSV)
+      → chunk (512 tokens, 50 overlap)
+      → embed batch (text-embedding-3-small)
+      → upsert Qdrant (payload: user_id for isolation)
+      → update status=INDEXED
 
-Query Time
-  User Query
-  → Embedding (same model)
-  → Qdrant ANN search (filtered by user_id, top-k=20)
-  → PostgreSQL join (enrich with doc metadata)
-  → Cross-encoder reranking (top-5)
-  → Context builder (token-budget aware)
-  → Eino Agent (injected as system context)
+POST /rag/search
+  → embed query
+  → Qdrant ANN (filtered by user_id)
+  → rerank top-5
+  → return ranked chunks with source doc name
 ```
 
----
+### Internal Event Bus
 
-## Memory Architecture
+Modules communicate via events — no direct calls across module boundaries.
 
-| Layer          | Storage | TTL / Eviction                        |
-|----------------|---------|---------------------------------------|
-| Short-term     | Redis   | 2-hour sliding window (last N turns)  |
-| Long-term      | PostgreSQL | Permanent, indexed by importance   |
-| Semantic       | Qdrant  | Mirrors long-term, vector searchable  |
-
-Memory entries are classified: FACT, PREFERENCE, EVENT, SKILL, RELATIONSHIP.
-The agent retrieves top-K relevant memories before each response.
-
----
-
-## AI Agent Architecture (Eino)
-
-```
-User Message
-  │
-  ▼
-Supervisor Agent (Eino Graph)
-  ├── Research Agent    → RAG retrieval + web search tools
-  ├── Coding Agent      → GitHub tool + code execution
-  ├── Planning Agent    → workflow creation, task breakdown
-  └── Workflow Agent    → triggers existing workflows
-
-Each agent:
-  1. Loads short-term memory from Redis
-  2. Retrieves semantic memories from Qdrant
-  3. Retrieves RAG context if rag_enabled
-  4. Calls tools via the Tool Registry
-  5. Writes new memories post-response
-  6. Emits ChatCompleted event
-```
-
----
-
-## RBAC
-
-| Role          | Permissions                                              |
-|---------------|----------------------------------------------------------|
-| `USER`        | Own resources: chat, documents, memory, agents, workflows |
-| `PREMIUM_USER`| USER + higher rate limits, voice, advanced agents        |
-| `ADMIN`       | All resources, user management, audit logs               |
-
-Role is embedded in the JWT claim — no DB lookup per request.
-
----
-
-## Internal Event Bus
-
-The in-process event bus decouples modules without a message broker. It will be
-extracted to NATS or Kafka when the first module is split into a microservice.
-
-| Event                  | Publisher | Subscribers              |
-|------------------------|-----------|--------------------------|
-| `auth.user_registered` | auth      | audit, billing, email    |
-| `auth.user_logged_in`  | auth      | audit                    |
-| `document.uploaded`    | document  | rag (triggers processing)|
-| `rag.embedding_created`| rag       | audit                    |
-| `memory.created`       | memory    | audit                    |
-| `workflow.executed`    | workflow  | audit, billing           |
-| `chat.completed`       | chat      | memory (auto-extraction) |
-
----
-
-## Database Schema
-
-13 tables across 11 migration files (run in order):
-
-```
-000_init.sql              Extensions, shared trigger function
-001_create_users.sql      Users with RBAC + OAuth support
-002_create_refresh_tokens.sql  JWT rotation, stored hashed
-003_create_agents.sql     Agent definitions
-004_create_conversations.sql   Chat session containers
-005_create_messages.sql   Individual chat messages
-006_create_documents.sql  Uploaded document metadata
-007_create_document_chunks.sql Chunked text + Qdrant links
-008_create_memories.sql   Long-term memory entries
-009_create_workflows.sql  Workflow DAGs + execution runs
-010_create_tools.sql      Tool registry + user configs
-011_create_audit_logs.sql Partitioned, immutable audit trail
-```
-
----
-
-## Development Roadmap
-
-| Phase | Feature         | Modules            | Target       |
-|-------|-----------------|--------------------|--------------|
-| 1     | Authentication  | auth               | Week 1       |
-| 2     | Chat            | chat, agent (basic)| Week 2-3     |
-| 3     | RAG             | document, rag      | Week 4-5     |
-| 4     | Memory          | memory             | Week 6       |
-| 5     | AI Agents       | agent (Eino graph) | Week 7-9     |
-| 6     | Voice           | voice              | Week 10      |
-| 7     | Workflows       | workflow, tool     | Week 11-13   |
-| 8     | Multi-tenant    | all modules        | Week 14-16   |
+| Event                     | Publisher | Subscriber             |
+|---------------------------|-----------|------------------------|
+| `auth.user_registered`    | auth      | audit, billing (future)|
+| `document.uploaded`       | document  | rag processor          |
+| `document.indexed`        | rag       | audit                  |
+| `document.deleted`        | document  | qdrant cleanup         |
+| `chat.completed`          | chat      | memory extractor (P4)  |
+| `memory.created`          | memory    | audit (future)         |
+| `workflow.executed`       | workflow  | audit, billing (future)|
 
 ---
 
@@ -197,112 +97,101 @@ extracted to NATS or Kafka when the first module is split into a microservice.
 
 ```bash
 # 1. Clone and configure
-git clone <repo>
-cd jarvas
+git clone <repo> && cd jarvas
 cp .env.example .env
-# Fill in JWT_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, OPENAI_API_KEY
+# Required: JWT_SECRET, DB_PASSWORD
+# For chat+RAG: OPENAI_API_KEY
+# For OAuth:   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
 
-# 2. Start everything (first time)
+# 2. First-time setup (starts Docker, migrates DB, installs npm deps)
 make setup
 
-# 3. Dev mode (two terminals)
-make dev          # Go backend on :8080
-make dev-front    # React frontend on :5173
+# 3. Run (two terminals)
+make dev          # Go backend  :8080  (auto-starts Docker infra)
+make dev-front    # React       :5173
 
-# 4. Or run fully in Docker
+# Or run everything in Docker
 make docker-up
 ```
 
 ---
 
-## API Overview
+## Live API Endpoints
 
-All endpoints are under `/api/v1`.
+All routes require `Authorization: Bearer <access_token>` except auth endpoints.
 
-### Auth
+### Auth ✅
 ```
-POST   /auth/register          Email/password registration
-POST   /auth/login             Email/password login → TokenPair
-POST   /auth/refresh           Rotate refresh token (cookie or body)
-POST   /auth/logout            Revoke refresh token
-GET    /auth/google/login      Get Google OAuth URL
-GET    /auth/google/callback   Handle OAuth callback
-GET    /auth/me                Get current user (protected)
-```
-
-### Chat (Phase 2)
-```
-POST   /conversations          Create conversation
-GET    /conversations          List conversations
-GET    /conversations/:id      Get conversation + messages
-POST   /conversations/:id/messages   Send message (stream=true for SSE)
-DELETE /conversations/:id      Archive conversation
+POST  /api/v1/auth/register           Register (email/password)
+POST  /api/v1/auth/login              Login → access + refresh token
+POST  /api/v1/auth/refresh            Rotate refresh token (cookie or body)
+POST  /api/v1/auth/logout             Revoke refresh token    [protected]
+GET   /api/v1/auth/google/login       Get Google OAuth URL
+GET   /api/v1/auth/google/callback    OAuth callback
+GET   /api/v1/auth/me                 Current user profile    [protected]
 ```
 
-### Documents (Phase 3)
+### Chat ✅
 ```
-POST   /documents              Upload document (multipart)
-GET    /documents              List documents
-GET    /documents/:id          Get document metadata
-DELETE /documents/:id          Delete document + chunks
-GET    /documents/:id/chunks   List chunks
-POST   /rag/search             Semantic search
-```
-
-### Memory (Phase 4)
-```
-GET    /memories               List memories
-POST   /memories               Create memory
-PATCH  /memories/:id           Update memory
-DELETE /memories/:id           Delete memory
-POST   /memories/search        Semantic memory search
+POST  /api/v1/conversations                   Create conversation
+GET   /api/v1/conversations                   List (paginated)
+GET   /api/v1/conversations/:id               Get + messages
+DELETE /api/v1/conversations/:id              Archive
+POST  /api/v1/conversations/:id/messages      Send message
+                                              body.stream=true → SSE
+GET   /api/v1/conversations/:id/messages      List messages (paginated)
 ```
 
-### Agents (Phase 5)
+### Documents + RAG ✅
 ```
-POST   /agents                 Create agent
-GET    /agents                 List agents
-GET    /agents/:id             Get agent
-PATCH  /agents/:id             Update agent
-DELETE /agents/:id             Delete agent
+POST  /api/v1/documents              Upload (multipart/form-data, field: file)
+GET   /api/v1/documents              List documents (paginated)
+GET   /api/v1/documents/:id          Get + status (UPLOADED/PROCESSING/INDEXED/FAILED)
+DELETE /api/v1/documents/:id         Delete + Qdrant cleanup
+GET   /api/v1/documents/:id/url      24h presigned download URL
+GET   /api/v1/documents/:id/chunks   List raw text chunks
+POST  /api/v1/rag/search             Semantic search (body: {query, top_k, min_score})
 ```
 
-### Workflows (Phase 7)
+### Memory (Phase 4 — coming next)
 ```
-POST   /workflows              Create workflow
-GET    /workflows              List workflows
-POST   /workflows/:id/run      Trigger workflow run
-GET    /workflows/:id/runs     List runs
+GET   /api/v1/memories               List memories
+POST  /api/v1/memories               Create memory
+PATCH /api/v1/memories/:id           Update
+DELETE /api/v1/memories/:id          Delete
+POST  /api/v1/memories/search        Semantic search
 ```
 
 ---
 
-## Security Considerations
+## Security
 
-- **JWT**: HS256 signed, 15min access token, 7-day rotating refresh token
-- **Refresh tokens**: stored as SHA-256 hash only — token theft doesn't expose raw value
-- **OAuth state**: stored in Redis with 10min TTL to prevent CSRF
-- **Passwords**: bcrypt with cost 10
-- **Rate limiting**: per-IP and per-user (Redis sliding window — Phase 2)
-- **Audit log**: immutable, partitioned by quarter, captures all sensitive actions
-- **Tool credentials**: encrypted at application layer before DB storage (Phase 5)
-- **CORS**: strict allowlist, credentials allowed only for configured origins
+- **JWT**: HS256, 15-min access token, 7-day rotating refresh (SHA-256 hashed in DB)
+- **Qdrant isolation**: every search filters `payload.user_id` — users never see each other's data
+- **OAuth CSRF**: state stored in Redis (10 min TTL), deleted on use
+- **Passwords**: bcrypt cost 10
+- **Presigned URLs**: MinIO 24h URLs — backend never proxies file downloads
+- **Error logging**: 5xx errors log the cause server-side; clients only see generic message
 
 ---
 
-## Future Microservice Extraction Strategy
+## Documentation
 
-The boundary is already drawn by the module structure. Extraction order:
+| File | Contents |
+|------|----------|
+| [JARVAS.md](JARVAS.md) | Full developer guide: architecture, all APIs, env vars, coding conventions |
+| [PHASES.md](PHASES.md) | Phase-by-phase build checklist with exact files, code, and curl tests |
 
-1. `document` + `rag` → Document Processing Service (I/O heavy, scales independently)
-2. `voice` → Voice Service (GPU/Whisper, latency-sensitive)
-3. `workflow` → Workflow Engine (stateful, long-running)
-4. `billing` → Billing Service (isolated domain, compliance boundary)
-5. `agent` → Agent Service (compute-heavy, independent scaling)
+---
 
-Each extraction requires:
-- Moving the module folder
-- Replacing the internal event bus calls with NATS/Kafka publish
-- Replacing direct function calls with gRPC or HTTP
+## Microservice Extraction Order
 
-The repository pattern means DB access is already abstracted behind interfaces.
+When a module needs to scale independently:
+
+1. `document` + `rag` — I/O and GPU heavy, extract first
+2. `voice` — Whisper needs GPU nodes
+3. `workflow` — stateful long-running, add Temporal
+4. `agent` — compute-heavy, independent replicas
+5. `billing` — compliance boundary
+
+Each extraction: move module folder → swap `bus.Publish()` for NATS/Kafka → swap function calls for gRPC.

@@ -2,7 +2,7 @@ package dto
 
 // SendMessageRequest is the payload for a chat turn.
 type SendMessageRequest struct {
-	ConversationID string `json:"conversation_id" validate:"omitempty,uuid"`
+	ConversationID string `json:"conversation_id"`
 	AgentID        string `json:"agent_id"        validate:"omitempty,uuid"`
 	Content        string `json:"content"         validate:"required,min=1,max=32000"`
 	Stream         bool   `json:"stream"`
@@ -31,10 +31,8 @@ type ConversationResponse struct {
 	UpdatedAt string            `json:"updated_at"`
 }
 
-// StreamChunk is a single SSE frame for streaming responses.
+// StreamChunk is a single SSE payload for streaming responses.
 type StreamChunk struct {
-	Delta    string `json:"delta"`
-	Done     bool   `json:"done"`
-	TokensIn int    `json:"tokens_in,omitempty"`
-	TokensOut int   `json:"tokens_out,omitempty"`
+	Delta string `json:"delta"`
+	Done  bool   `json:"done"`
 }
