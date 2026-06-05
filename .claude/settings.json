@@ -3,7 +3,16 @@
     "allow": [
       "Bash(docker compose *)",
       "Bash(open -a Docker)",
-      "Bash(docker info *)"
+      "Bash(docker info *)",
+      "Bash(mkdir -p /Users/administrator/Desktop/basic/LLD/jarvas/backend/internal/modules/chat/domain/event)",
+      "Bash(mkdir -p /Users/administrator/Desktop/basic/LLD/jarvas/backend/internal/modules/memory/application/port)",
+      "Bash(mkdir -p /Users/administrator/Desktop/basic/LLD/jarvas/backend/internal/modules/memory/application/dto)",
+      "Bash(mkdir -p /Users/administrator/Desktop/basic/LLD/jarvas/backend/internal/modules/memory/application/service)",
+      "Bash(mkdir -p /Users/administrator/Desktop/basic/LLD/jarvas/backend/internal/modules/memory/infrastructure/repository)",
+      "Bash(find /Users/administrator/go/pkg/mod/github.com/cloudwego/eino-ext -type d 2>/dev/null | head -30)",
+      "Read(//Users/administrator/go/pkg/mod/github.com/cloudwego/eino-ext/**)",
+      "Bash(grep -n \"ToolInfo\\\\|ToolCallID\\\\|ToolCall\\\\b\\\\|Role\\\\|RoleUser\\\\|RoleSystem\\\\|RoleTool\\\\|RoleAssist\" /Users/administrator/go/pkg/mod/github.com/cloudwego/eino@v0.9.4/schema/message.go | head -30)",
+      "Read(//Users/administrator/go/pkg/mod/github.com/cloudwego/eino@v0.9.4/schema/**)"
     ]
   }
 }

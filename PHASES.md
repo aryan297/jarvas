@@ -12,9 +12,9 @@
 | 1     | Auth              | ✅ Complete   | ✅ Complete   | **DONE**         |
 | 2     | Chat + Streaming  | ✅ Complete   | ✅ Complete   | **DONE**         |
 | 3     | Documents + RAG   | ✅ Complete   | ✅ Complete   | **DONE**         |
-| 4     | Memory            | 🔲 Not started | 🔲 Not started | **▶ ACTIVE NEXT**|
-| 5     | AI Agents (Eino)  | 🔲 Not started | 🔲 Not started | Pending          |
-| 6     | Voice             | 🔲 Not started | 🔲 Not started | Pending          |
+| 4     | Memory            | ✅ Complete   | ✅ Complete   | **DONE**         |
+| 5     | AI Agents (Eino)  | ✅ Complete   | ✅ Complete   | **DONE**         |
+| 6     | Voice             | 🔲 Not started | 🔲 Not started | **▶ ACTIVE NEXT**|
 | 7     | Workflows + Tools | 🔲 Not started | 🔲 Not started | Pending          |
 | 8     | Multi-Tenant      | 🔲 Not started | 🔲 Not started | Pending          |
 
@@ -1002,30 +1002,67 @@ DELETE /documents/:id
 
 ---
 
-# ▶ Phase 4 — Memory (ACTIVE NEXT)
+# ✅ Phase 4 — Memory (COMPLETE)
 
 **Goal:** AI remembers facts across conversations. Short-term (Redis), long-term (Postgres + Qdrant).
 
-**Time estimate:** 3–4 days
+## Files Built
 
-## Checklist
 ```
 Backend
-  [ ] memory/application/port/repository.go
-  [ ] memory/application/service/memory_service.go  (CRUD + semantic search)
-  [ ] memory/application/service/extractor.go  (LLM extraction from ChatCompleted event)
-  [ ] memory/infrastructure/repository/memory_repo.go
-  [ ] Create Qdrant "memory" collection (separate from "documents")
-  [ ] memory/delivery/http/handler.go
-  [ ] memory/delivery/http/routes.go
-  [ ] Subscribe ChatCompleted → extractor in main.go
-  [ ] Inject memory context into chat service SendMessage
+  ✅ chat/domain/event/events.go                     ChatCompleted event
+  ✅ chat/application/port/repository.go              MemoryRetriever interface (avoids import cycle)
+  ✅ chat/application/service/chat_service.go         Memory injection + ChatCompleted publish
+  ✅ memory/application/port/repository.go            MemoryRepository interface
+  ✅ memory/application/dto/memory_dto.go             Create/search/response DTOs
+  ✅ memory/application/service/memory_service.go     CRUD + semantic search + LLM extraction
+  ✅ memory/infrastructure/repository/memory_repo.go  pgx implementation
+  ✅ memory/delivery/http/handler.go                  4 endpoints
+  ✅ memory/delivery/http/routes.go
 
 Frontend
-  [ ] services/memory.service.ts
-  [ ] pages/memory/MemoryPage.tsx  (list, create, delete, search)
-  [ ] pages/memory/MemoryCard.tsx  (type badge, importance bar, content)
+  ✅ services/memory.service.ts
+  ✅ pages/memory/MemoryPage.tsx   (tabbed: list + semantic search, create, delete)
+  ✅ pages/memory/MemoryCard.tsx   (type badge, importance bar, content)
 ```
+
+## Verified Endpoints
+
+```
+POST   /api/v1/memories           Create memory manually
+GET    /api/v1/memories           List user memories (paginated, sorted by importance)
+DELETE /api/v1/memories/:id       Delete memory + Qdrant vector
+POST   /api/v1/memories/search    Semantic search (body: {query, top_k, min_score})
+```
+
+## Pipeline Flow
+
+```
+Chat message sent
+  → ChatService.SendMessage / StreamMessage
+  → Retrieve top-5 relevant memories → append to system prompt
+  → Call OpenAI with enriched context
+  → bus.Publish(ChatCompleted{UserID, UserMsg, AssistMsg})
+
+Background goroutine (ChatCompleted handler):
+  → MemoryService.Extract(userID, userMsg, assistMsg)
+  → OpenAI call: extract 0–3 facts/preferences/skills about the user
+  → Parse JSON response
+  → Save each memory to Postgres
+  → EmbedText → Upsert to Qdrant "memory" collection
+
+DELETE /memories/:id
+  → DeleteByFilter(Qdrant, {memory_id: id})
+  → DELETE from Postgres
+```
+
+## Key Design Decisions
+
+- **Import cycle avoided**: `MemoryRetriever` interface defined in `chat/application/port` — memory module never imports chat
+- **Graceful degradation**: `memSvc` is injected via `SetMemoryRetriever()` after construction; if nil, chat works normally
+- **Separate Qdrant collection**: "memory" collection is isolated from "documents" — same QdrantStore client, different collection name
+- **Auto-extraction**: every chat turn triggers async LLM extraction — user never has to manage memories manually
+- **Tenant isolation**: all Qdrant searches filter by `user_id` payload field
 
 **Key pattern — inject into chat:**
 ```go
@@ -1040,67 +1077,150 @@ if len(memories) > 0 {
 
 ---
 
-# Phase 5 — AI Agents (Eino)
+# ✅ Phase 5 — AI Agents (Eino) (COMPLETE)
 
-**Goal:** Named agents with custom prompts, tool calling, supervisor routing to sub-agents.
+**Goal:** Named agents with custom prompts, tool calling, memory + RAG injection, wired into chat.
 
-**Time estimate:** 7–10 days
-
-**Dependencies:**
+**Dependencies added:**
 ```bash
-go get github.com/cloudwego/eino
-go get github.com/cloudwego/eino-ext/components/model/openai
+go get github.com/cloudwego/eino@v0.9.4
+go get github.com/cloudwego/eino-ext/components/model/openai@v0.1.13
 ```
 
-## Checklist
+## Files Built
+
 ```
 Backend
-  [ ] agent/application/port/repository.go
-  [ ] agent/application/service/agent_service.go  (CRUD)
-  [ ] agent/application/service/agent_runner.go   (builds Eino graph, injects context)
-  [ ] agent/infrastructure/repository/agent_repo.go
-  [ ] agent/infrastructure/eino/simple_agent.go   (build this first)
-  [ ] agent/infrastructure/eino/supervisor_graph.go
-  [ ] tool/application/service/tool_registry.go
-  [ ] tool/infrastructure/executors/http_tool.go
-  [ ] tool/infrastructure/executors/postgres_tool.go
-  [ ] agent/delivery/http/handler.go
-  [ ] agent/delivery/http/routes.go
-  [ ] Wire all in main.go
+  ✅ agent/application/port/repository.go               AgentRepository interface
+  ✅ agent/application/service/agent_service.go          CRUD: Create, List, GetByID, Update, Delete
+  ✅ agent/application/service/runner_service.go         Implements AgentRunnerPort; injects memory
+  ✅ agent/infrastructure/repository/agent_repo.go       pgx — JSONB tools_enabled, agent_type cast
+  ✅ agent/infrastructure/eino/runner.go                 Eino ChatModel + tool calling loop (max 5 iters)
+  ✅ tool/application/service/tool_registry.go           Registry: name → ToolDef{Info, Execute}
+  ✅ tool/infrastructure/executors/web_search.go         DuckDuckGo instant answers (no API key)
+  ✅ tool/infrastructure/executors/calculator.go         Arithmetic: add/subtract/multiply/divide/modulo
+  ✅ agent/delivery/http/handler.go                      5 endpoints (CRUD)
+  ✅ agent/delivery/http/routes.go
 
 Frontend
-  [ ] services/agent.service.ts
-  [ ] pages/agents/AgentsPage.tsx     (agent list + create)
-  [ ] pages/agents/AgentForm.tsx      (create/edit form)
-  [ ] pages/agents/AgentCard.tsx      (name, type, tools, edit/delete)
-  [ ] Update ChatPage to support agent selection per conversation
+  ✅ services/agent.service.ts                          create, list, getById, update, delete
+  ✅ pages/agents/AgentsPage.tsx                        List + create/edit/delete + "Chat with agent" button
+  ✅ pages/agents/AgentForm.tsx                         Full form: type, model, temp, tools, memory, RAG
+  ✅ pages/agents/AgentCard.tsx                         Type badge, tool chips, meta row
+  ✅ pages/chat/ChatPage.tsx                            Updated: reads ?agent_id param, shows agent selector
 ```
 
-**Build order:** simple_agent → wire into chat → test → supervisor_graph → sub-agents → tools
+## Verified Endpoints
+
+```
+POST  /api/v1/agents          Create agent
+GET   /api/v1/agents          List agents (paginated)
+GET   /api/v1/agents/:id      Get agent
+PATCH /api/v1/agents/:id      Update agent
+DELETE /api/v1/agents/:id     Soft-delete (is_active=false)
+```
+
+## Tool Calling Flow
+
+```
+User sends message to agent conversation
+        │
+        ▼
+ChatService detects conv.agent_id → delegates to RunnerService.RunMessage
+        │
+        ▼
+RunnerService.buildRunConfig()
+  → Fetch agent from DB (model, temp, max_tokens, tools, system_prompt)
+  → If memory_enabled: SearchRelevant → prepend to system prompt
+  → Look up enabled tools in ToolRegistry → get []schema.ToolInfo
+        │
+        ▼
+EinoRunner.Run()
+  → openai.NewChatModel(apiKey, model, temp, maxTokens)
+  → cm.BindTools(toolInfos)
+  → Loop up to 5 iterations:
+      - cm.Generate(msgs) → resp
+      - if resp.ToolCalls == nil → return resp.Content
+      - for each tool call: registry.Execute(name, argsJSON) → result
+      - append ToolMessage(result, callID) to msgs
+  → return final assistant text
+```
+
+## Key Design Decisions
+
+- **AgentRunnerPort in chat/port**: avoids import cycle between chat ↔ agent (same pattern as MemoryRetriever)
+- **SetAgentRunner()** injected after construction in main.go
+- **Tool registry**: stateless — any function `(argsJSON string) → (string, error)` can be registered
+- **Built-in tools**: `web_search` (DuckDuckGo, no key) + `calculator` (safe structured arithmetic)
+- **Memory in agents**: RunnerService has its own `MemoryRetriever` so agents get user context too
+- **Streaming agents**: tool loop uses `Generate()`, final response emitted word-by-word to simulate streaming
 
 ---
 
 ---
 
-# Phase 6 — Voice
+# ✅ Phase 6 — Voice (COMPLETE)
 
 **Goal:** Record audio in browser → Whisper transcribes → injects as chat message.
 
-**Time estimate:** 2–3 days
+## Files Built
 
-## Checklist
 ```
 Backend
-  [ ] voice/infrastructure/transcription/whisper.go
-  [ ] voice/application/service/voice_service.go
-  [ ] voice/delivery/http/handler.go  (multipart audio upload)
-  [ ] voice/delivery/http/routes.go
-  [ ] Wire in main.go
+  ✅ voice/application/port/ports.go                 SessionStore, AudioStore, TranscriptionPort interfaces
+  ✅ voice/application/dto/voice_dto.go               Upload request/response + VoiceSessionResponse
+  ✅ voice/application/service/voice_service.go       Upload (async), GetSession, ListSessions
+  ✅ voice/infrastructure/transcription/whisper.go    OpenAI Whisper API (go-openai SDK)
+  ✅ voice/infrastructure/storage/audio_storage.go    MinIO audio bucket (audio/{user_id}/{session_id}.ext)
+  ✅ voice/infrastructure/cache/session_store.go      Redis session store (24h TTL, no migration needed)
+  ✅ voice/delivery/http/handler.go                   3 endpoints
+  ✅ voice/delivery/http/routes.go
 
 Frontend
-  [ ] components/VoiceRecorder.tsx  (MediaRecorder API → upload → poll → inject message)
-  [ ] Add mic button to ChatInput.tsx
+  ✅ services/voice.service.ts                        upload, getSession, listSessions, pollUntilDone
+  ✅ components/VoiceRecorder.tsx                     MediaRecorder → upload → poll → inject transcript
+  ✅ pages/chat/ChatInput.tsx                         Mic button added; transcript injected into textarea
+  ✅ pages/chat/MessageThread.tsx                     Passes convId down to ChatInput
 ```
+
+## Verified Endpoints
+
+```
+POST /api/v1/voice/upload           Multipart: audio (file) + conversation_id + language?
+                                    → 202 Accepted { session_id, status: "PENDING" }
+GET  /api/v1/voice/sessions/:id     Poll: { status, transcript, duration_seconds, ... }
+GET  /api/v1/voice/sessions         List user's recent sessions (last 20)
+```
+
+## Flow
+
+```
+User clicks mic → MediaRecorder starts recording
+User clicks stop → Blob created (audio/webm)
+  → POST /voice/upload (multipart)
+  → MinIO: audio/{user_id}/{session_id}.webm
+  → Redis: VoiceSession{status=PENDING}
+  → Background goroutine starts
+  → Returns 202 with session_id
+
+Frontend polls GET /voice/sessions/:id every 2s (max 30s):
+  Background goroutine:
+    → Redis: status=PROCESSING
+    → Download from MinIO
+    → OpenAI Whisper API → transcript text
+    → Redis: status=COMPLETED, transcript="..."
+
+Frontend sees COMPLETED → injects transcript into ChatInput textarea
+User reviews text → presses Enter to send as a chat message
+```
+
+## Key Design Decisions
+
+- **No DB migration**: voice sessions stored in Redis (24h TTL) — ephemeral by design
+- **Async upload**: returns 202 immediately; Whisper runs in goroutine — no request timeout
+- **Transcript injection**: text is placed in the textarea for user review, NOT auto-sent
+- **Supported formats**: webm, mp4, mpeg, ogg, wav, m4a (25 MB Whisper limit enforced server-side)
+- **MinIO bucket**: uses existing `MINIO_BUCKET_AUDIO` (env default: "audio") — bucket must be created on first run
 
 ---
 

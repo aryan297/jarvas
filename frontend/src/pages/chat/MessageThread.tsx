@@ -123,7 +123,7 @@ export default function MessageThread({ convId }: Props) {
       </div>
 
       {/* Input */}
-      <ChatInput onSend={handleSend} disabled={sending} />
+      <ChatInput onSend={handleSend} disabled={sending} conversationId={convId} />
     </div>
   )
 }

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	openai "github.com/sashabaranov/go-openai"
@@ -11,6 +12,7 @@ import (
 	"github.com/jarvas/backend/internal/modules/chat/application/dto"
 	"github.com/jarvas/backend/internal/modules/chat/application/port"
 	"github.com/jarvas/backend/internal/modules/chat/domain/entity"
+	chatevent "github.com/jarvas/backend/internal/modules/chat/domain/event"
 	apperrors "github.com/jarvas/backend/internal/shared/errors"
 	"github.com/jarvas/backend/internal/shared/cache"
 	"github.com/jarvas/backend/internal/shared/eventbus"
@@ -28,12 +30,14 @@ type ChatConfig struct {
 }
 
 type ChatService struct {
-	convRepo port.ConversationRepository
-	msgRepo  port.MessageRepository
-	cache    *cache.Client
-	bus      *eventbus.Bus
-	oai      *openai.Client
-	cfg      ChatConfig
+	convRepo    port.ConversationRepository
+	msgRepo     port.MessageRepository
+	memSvc      port.MemoryRetriever  // optional — injected after construction
+	agentRunner port.AgentRunnerPort  // optional — injected after construction
+	cache       *cache.Client
+	bus         *eventbus.Bus
+	oai         *openai.Client
+	cfg         ChatConfig
 }
 
 func NewChatService(
@@ -53,7 +57,11 @@ func NewChatService(
 	}
 }
 
-// CreateConversation creates a new conversation and returns its DTO.
+func (s *ChatService) SetMemoryRetriever(m port.MemoryRetriever) { s.memSvc = m }
+func (s *ChatService) SetAgentRunner(r port.AgentRunnerPort)     { s.agentRunner = r }
+
+// ── Public methods ────────────────────────────────────────────────────────────
+
 func (s *ChatService) CreateConversation(ctx context.Context, userID uuid.UUID, req dto.CreateConversationRequest) (*dto.ConversationResponse, error) {
 	var agentID *uuid.UUID
 	if req.AgentID != "" {
@@ -71,7 +79,6 @@ func (s *ChatService) CreateConversation(ctx context.Context, userID uuid.UUID, 
 	return toConvDTO(conv), nil
 }
 
-// ListConversations returns paginated conversations for a user.
 func (s *ChatService) ListConversations(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*dto.ConversationResponse, int64, error) {
 	convs, total, err := s.convRepo.FindByUserID(ctx, userID, limit, offset)
 	if err != nil {
@@ -84,7 +91,6 @@ func (s *ChatService) ListConversations(ctx context.Context, userID uuid.UUID, l
 	return result, total, nil
 }
 
-// GetConversation returns a single conversation with its recent messages.
 func (s *ChatService) GetConversation(ctx context.Context, convID, userID uuid.UUID) (*dto.ConversationResponse, error) {
 	conv, err := s.convRepo.FindByID(ctx, convID, userID)
 	if err != nil {
@@ -98,18 +104,14 @@ func (s *ChatService) GetConversation(ctx context.Context, convID, userID uuid.U
 	return resp, nil
 }
 
-// ArchiveConversation soft-deletes a conversation.
 func (s *ChatService) ArchiveConversation(ctx context.Context, convID, userID uuid.UUID) error {
-	// Verify ownership first.
 	if _, err := s.convRepo.FindByID(ctx, convID, userID); err != nil {
 		return err
 	}
 	return s.convRepo.Archive(ctx, convID)
 }
 
-// ListMessages returns paginated messages for a conversation.
 func (s *ChatService) ListMessages(ctx context.Context, convID, userID uuid.UUID, limit, offset int) ([]*dto.MessageResponse, int64, error) {
-	// Verify ownership.
 	if _, err := s.convRepo.FindByID(ctx, convID, userID); err != nil {
 		return nil, 0, err
 	}
@@ -125,7 +127,6 @@ func (s *ChatService) ListMessages(ctx context.Context, convID, userID uuid.UUID
 	return result, total, nil
 }
 
-// SendMessage sends a user message, calls OpenAI, and returns the assistant reply.
 func (s *ChatService) SendMessage(ctx context.Context, userID uuid.UUID, req dto.SendMessageRequest) (*dto.MessageResponse, error) {
 	conv, err := s.resolveConversation(ctx, userID, req)
 	if err != nil {
@@ -133,27 +134,39 @@ func (s *ChatService) SendMessage(ctx context.Context, userID uuid.UUID, req dto
 	}
 
 	userMsg := s.saveMessage(ctx, conv.ID, entity.RoleUser, req.Content, "", 0)
-
 	history := s.loadHistory(ctx, conv.ID)
-	oaiMessages := buildOAIMessages(history, req.Content)
 
-	resp, err := s.oai.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model:     s.cfg.Model,
-		Messages:  oaiMessages,
-		MaxTokens: s.cfg.MaxTokens,
-	})
-	if err != nil {
-		return nil, apperrors.Internal(fmt.Errorf("openai: %w", err))
+	var content string
+
+	// Delegate to agent runner if this conversation is tied to an agent.
+	if conv.AgentID != nil && s.agentRunner != nil {
+		content, err = s.agentRunner.RunMessage(ctx, *conv.AgentID, userID, req.Content, history)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		systemPrompt := s.buildSystemPrompt(ctx, userID, req.Content)
+		oaiMessages := buildOAIMessages(systemPrompt, history, req.Content)
+		resp, oaiErr := s.oai.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+			Model:     s.cfg.Model,
+			Messages:  oaiMessages,
+			MaxTokens: s.cfg.MaxTokens,
+		})
+		if oaiErr != nil {
+			return nil, apperrors.Internal(fmt.Errorf("openai: %w", oaiErr))
+		}
+		content = resp.Choices[0].Message.Content
 	}
 
-	content := resp.Choices[0].Message.Content
-	asstMsg := s.saveMessage(ctx, conv.ID, entity.RoleAssistant, content, s.cfg.Model, resp.Usage.TotalTokens)
-
+	asstMsg := s.saveMessage(ctx, conv.ID, entity.RoleAssistant, content, s.cfg.Model, 0)
 	s.appendHistory(ctx, conv.ID, userMsg, asstMsg)
+	s.bus.Publish(ctx, chatevent.ChatCompleted{
+		UserID: userID, ConvID: conv.ID,
+		UserMsg: req.Content, AssistMsg: content,
+	})
 	return toMsgDTO(asstMsg), nil
 }
 
-// StreamMessage sends a user message and returns a channel of delta strings for SSE.
 func (s *ChatService) StreamMessage(ctx context.Context, userID uuid.UUID, req dto.SendMessageRequest) (<-chan string, error) {
 	conv, err := s.resolveConversation(ctx, userID, req)
 	if err != nil {
@@ -162,7 +175,35 @@ func (s *ChatService) StreamMessage(ctx context.Context, userID uuid.UUID, req d
 
 	userMsg := s.saveMessage(ctx, conv.ID, entity.RoleUser, req.Content, "", 0)
 	history := s.loadHistory(ctx, conv.ID)
-	oaiMessages := buildOAIMessages(history, req.Content)
+
+	// Agent streaming path.
+	if conv.AgentID != nil && s.agentRunner != nil {
+		ch, err := s.agentRunner.StreamMessage(ctx, *conv.AgentID, userID, req.Content, history)
+		if err != nil {
+			return nil, err
+		}
+		// Wrap the channel: collect full content, save message, publish event.
+		outCh := make(chan string, 64)
+		go func() {
+			defer close(outCh)
+			var full string
+			for delta := range ch {
+				full += delta
+				outCh <- delta
+			}
+			asstMsg := s.saveMessage(ctx, conv.ID, entity.RoleAssistant, full, s.cfg.Model, 0)
+			s.appendHistory(ctx, conv.ID, userMsg, asstMsg)
+			s.bus.Publish(ctx, chatevent.ChatCompleted{
+				UserID: userID, ConvID: conv.ID,
+				UserMsg: req.Content, AssistMsg: full,
+			})
+		}()
+		return outCh, nil
+	}
+
+	// Default OpenAI streaming path.
+	systemPrompt := s.buildSystemPrompt(ctx, userID, req.Content)
+	oaiMessages := buildOAIMessages(systemPrompt, history, req.Content)
 
 	stream, err := s.oai.CreateChatCompletionStream(ctx, openai.ChatCompletionRequest{
 		Model:     s.cfg.Model,
@@ -178,7 +219,6 @@ func (s *ChatService) StreamMessage(ctx context.Context, userID uuid.UUID, req d
 	go func() {
 		defer close(ch)
 		defer stream.Close()
-
 		var full string
 		for {
 			chunk, err := stream.Recv()
@@ -192,17 +232,38 @@ func (s *ChatService) StreamMessage(ctx context.Context, userID uuid.UUID, req d
 			full += delta
 			ch <- delta
 		}
-
 		asstMsg := s.saveMessage(ctx, conv.ID, entity.RoleAssistant, full, s.cfg.Model, 0)
 		s.appendHistory(ctx, conv.ID, userMsg, asstMsg)
+		s.bus.Publish(ctx, chatevent.ChatCompleted{
+			UserID: userID, ConvID: conv.ID,
+			UserMsg: req.Content, AssistMsg: full,
+		})
 	}()
-
 	return ch, nil
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-// resolveConversation gets an existing conversation or creates one on-the-fly.
+func (s *ChatService) buildSystemPrompt(ctx context.Context, userID uuid.UUID, query string) string {
+	base := "You are Jarvas, a helpful AI assistant."
+	if s.memSvc == nil {
+		return base
+	}
+	memories, err := s.memSvc.SearchRelevant(ctx, userID, query, 5)
+	if err != nil || len(memories) == 0 {
+		return base
+	}
+	var sb strings.Builder
+	sb.WriteString(base)
+	sb.WriteString("\n\n## What you know about this user:\n")
+	for _, m := range memories {
+		sb.WriteString("- ")
+		sb.WriteString(m)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
 func (s *ChatService) resolveConversation(ctx context.Context, userID uuid.UUID, req dto.SendMessageRequest) (*entity.Conversation, error) {
 	if req.ConversationID != "" {
 		convID, err := uuid.Parse(req.ConversationID)
@@ -211,7 +272,6 @@ func (s *ChatService) resolveConversation(ctx context.Context, userID uuid.UUID,
 		}
 		return s.convRepo.FindByID(ctx, convID, userID)
 	}
-	// Auto-create a conversation when none is specified.
 	var agentID *uuid.UUID
 	if req.AgentID != "" {
 		id, _ := uuid.Parse(req.AgentID)
@@ -265,9 +325,9 @@ func (s *ChatService) appendHistory(ctx context.Context, convID uuid.UUID, msgs 
 	_ = s.cache.Set(ctx, key, history, shortTermTTL)
 }
 
-func buildOAIMessages(history []entity.Message, userMsg string) []openai.ChatCompletionMessage {
+func buildOAIMessages(systemPrompt string, history []entity.Message, userMsg string) []openai.ChatCompletionMessage {
 	msgs := []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem, Content: "You are Jarvas, a helpful AI assistant."},
+		{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
 	}
 	for _, h := range history {
 		role := openai.ChatMessageRoleUser

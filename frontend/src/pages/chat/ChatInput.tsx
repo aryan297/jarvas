@@ -1,13 +1,15 @@
 import { useRef, useState } from 'react'
 import { Send, Loader2, Zap } from 'lucide-react'
 import { clsx } from 'clsx'
+import VoiceRecorder from '@/components/VoiceRecorder'
 
 interface Props {
   onSend: (content: string, stream: boolean) => void
   disabled?: boolean
+  conversationId?: string
 }
 
-export default function ChatInput({ onSend, disabled }: Props) {
+export default function ChatInput({ onSend, disabled, conversationId }: Props) {
   const [value, setValue] = useState('')
   const [streaming, setStreaming] = useState(true)
   const ref = useRef<HTMLTextAreaElement>(null)
@@ -21,7 +23,6 @@ export default function ChatInput({ onSend, disabled }: Props) {
   }
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    // Enter = send; Shift+Enter = newline
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       submit()
@@ -33,6 +34,15 @@ export default function ChatInput({ onSend, disabled }: Props) {
     if (!el) return
     el.style.height = 'auto'
     el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+  }
+
+  // Inject transcript into textarea and focus so user can review before sending.
+  const handleTranscript = (text: string) => {
+    setValue((prev) => (prev ? `${prev} ${text}` : text))
+    setTimeout(() => {
+      ref.current?.focus()
+      onInput()
+    }, 50)
   }
 
   return (
@@ -49,6 +59,15 @@ export default function ChatInput({ onSend, disabled }: Props) {
           placeholder="Message Jarvas… (Enter to send, Shift+Enter for newline)"
           className="flex-1 resize-none bg-transparent text-sm focus:outline-none placeholder:text-muted-foreground disabled:opacity-50 max-h-40"
         />
+
+        {/* Voice recorder — only shown when a conversation is active */}
+        {conversationId && (
+          <VoiceRecorder
+            conversationId={conversationId}
+            onTranscript={handleTranscript}
+            disabled={disabled}
+          />
+        )}
 
         {/* Stream toggle */}
         <button

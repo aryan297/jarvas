@@ -7,18 +7,18 @@ Modular Monolith, with a clear extraction path to microservices.
 
 ## Build Status
 
-| Phase | Feature            | Status       |
-|-------|--------------------|--------------|
-| 1     | Auth               | ✅ **Done**  |
-| 2     | Chat + Streaming   | ✅ **Done**  |
-| 3     | Documents + RAG    | ✅ **Done**  |
-| 4     | Memory             | ▶ **Next**  |
-| 5     | AI Agents (Eino)   | 🔲 Pending  |
-| 6     | Voice              | 🔲 Pending  |
-| 7     | Workflows + Tools  | 🔲 Pending  |
-| 8     | Multi-Tenant       | 🔲 Pending  |
+| Phase | Feature            | Status        |
+|-------|--------------------|---------------|
+| 1     | Auth               | ✅ **Done**   |
+| 2     | Chat + Streaming   | ✅ **Done**   |
+| 3     | Documents + RAG    | ✅ **Done**   |
+| 4     | Memory             | ✅ **Done**   |
+| 5     | AI Agents (Eino)   | ✅ **Done**   |
+| 6     | Voice              | ✅ **Done**   |
+| 7     | Workflows + Tools  | ▶ **Next**   |
+| 8     | Multi-Tenant       | 🔲 Pending   |
 
-**48 backend module files · 30 frontend files · 0 build errors**
+**95 backend module files · 39 frontend files · 0 build errors**
 
 ---
 
@@ -45,29 +45,58 @@ Modular Monolith, with a clear extraction path to microservices.
 ```
 backend/internal/modules/
 ├── auth/      ✅  JWT, Google OAuth, RBAC, refresh token rotation
-├── chat/      ✅  Conversations, messages, SSE streaming, Redis memory
+├── chat/      ✅  Conversations, messages, SSE streaming, Redis short-term memory
 ├── document/  ✅  Upload → MinIO → async RAG indexing pipeline
 ├── rag/       ✅  Chunk → embed → Qdrant → rerank → context string
-├── memory/    🔲  Short-term (Redis) + long-term (Postgres + Qdrant)
-├── agent/     🔲  Eino graph: supervisor + research/coding/planning
-├── voice/     🔲  Audio → Whisper transcription → chat injection
+├── memory/    ✅  Long-term memory: Postgres + Qdrant, LLM auto-extraction
+├── agent/     ✅  Eino ChatModel, tool calling loop, memory injection, 5 endpoints
+├── voice/     ✅  Audio upload → Whisper → transcript injected into chat input
 ├── workflow/  🔲  DAG engine, cron triggers, tool execution
 └── tool/      🔲  Pluggable tool registry (HTTP, DB, GitHub, Calendar)
 ```
 
 Every module: `domain/ → application/ → infrastructure/ → delivery/`
 
-### RAG Pipeline (Live)
+### Agent Pipeline (Phase 5 — Live)
+
+```
+POST /conversations  { agent_id: "uuid" }
+  → conversation pinned to agent
+
+POST /conversations/:id/messages  { content: "..." }
+  → ChatService detects conv.agent_id → RunnerService.RunMessage()
+  → Fetch agent config (model, temp, tools, system_prompt)
+  → Memory injection if agent.memory_enabled
+  → EinoRunner: bind tools → Generate loop → tool calls executed → final reply
+  → ChatCompleted event → async memory extraction
+```
+
+### Memory Pipeline (Phase 4 — Live)
+
+```
+User sends chat message
+  → Qdrant: fetch top-5 relevant long-term memories
+  → Prepend to system prompt: "What you know about this user: ..."
+  → OpenAI generates response
+  → bus.Publish(ChatCompleted{userMsg, assistMsg})   ← async
+
+Background goroutine:
+  → OpenAI: extract 0–3 facts/preferences/skills from exchange
+  → INSERT into memories (Postgres)
+  → EmbedText → Upsert to Qdrant "memory" collection
+```
+
+### RAG Pipeline (Phase 3 — Live)
 
 ```
 POST /documents (multipart)
   → MinIO upload
   → bus.Publish(DocumentUploaded)   ← responds 201 here
-  → background goroutine
-      → extract text (PDF/TXT/MD/CSV)
+  → background goroutine:
+      → extract text (PDF / TXT / MD / CSV / HTML)
       → chunk (512 tokens, 50 overlap)
       → embed batch (text-embedding-3-small)
-      → upsert Qdrant (payload: user_id for isolation)
+      → upsert Qdrant (payload: user_id for tenant isolation)
       → update status=INDEXED
 
 POST /rag/search
@@ -81,15 +110,15 @@ POST /rag/search
 
 Modules communicate via events — no direct calls across module boundaries.
 
-| Event                     | Publisher | Subscriber             |
-|---------------------------|-----------|------------------------|
-| `auth.user_registered`    | auth      | audit, billing (future)|
-| `document.uploaded`       | document  | rag processor          |
-| `document.indexed`        | rag       | audit                  |
-| `document.deleted`        | document  | qdrant cleanup         |
-| `chat.completed`          | chat      | memory extractor (P4)  |
-| `memory.created`          | memory    | audit (future)         |
-| `workflow.executed`       | workflow  | audit, billing (future)|
+| Event                  | Publisher | Subscriber              |
+|------------------------|-----------|-------------------------|
+| `auth.user_registered` | auth      | audit, billing (future) |
+| `document.uploaded`    | document  | rag processor           |
+| `document.indexed`     | rag       | audit                   |
+| `document.deleted`     | document  | qdrant cleanup          |
+| `chat.completed`       | chat      | **memory extractor** ✅ |
+| `memory.created`       | memory    | audit (future)          |
+| `workflow.executed`    | workflow  | audit, billing (future) |
 
 ---
 
@@ -99,9 +128,9 @@ Modules communicate via events — no direct calls across module boundaries.
 # 1. Clone and configure
 git clone <repo> && cd jarvas
 cp .env.example .env
-# Required: JWT_SECRET, DB_PASSWORD
-# For chat+RAG: OPENAI_API_KEY
-# For OAuth:   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+# Required always:   JWT_SECRET, DB_PASSWORD
+# Required Phase 2+: OPENAI_API_KEY
+# Required Phase 1:  GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
 
 # 2. First-time setup (starts Docker, migrates DB, installs npm deps)
 make setup
@@ -138,7 +167,7 @@ GET   /api/v1/conversations                   List (paginated)
 GET   /api/v1/conversations/:id               Get + messages
 DELETE /api/v1/conversations/:id              Archive
 POST  /api/v1/conversations/:id/messages      Send message
-                                              body.stream=true → SSE
+                                              body.stream=true → SSE streaming
 GET   /api/v1/conversations/:id/messages      List messages (paginated)
 ```
 
@@ -150,17 +179,55 @@ GET   /api/v1/documents/:id          Get + status (UPLOADED/PROCESSING/INDEXED/F
 DELETE /api/v1/documents/:id         Delete + Qdrant cleanup
 GET   /api/v1/documents/:id/url      24h presigned download URL
 GET   /api/v1/documents/:id/chunks   List raw text chunks
-POST  /api/v1/rag/search             Semantic search (body: {query, top_k, min_score})
+POST  /api/v1/rag/search             Semantic search {query, top_k, min_score}
 ```
 
-### Memory (Phase 4 — coming next)
+### Memory ✅
 ```
-GET   /api/v1/memories               List memories
-POST  /api/v1/memories               Create memory
-PATCH /api/v1/memories/:id           Update
-DELETE /api/v1/memories/:id          Delete
-POST  /api/v1/memories/search        Semantic search
+POST  /api/v1/memories               Create memory manually
+GET   /api/v1/memories               List memories (sorted by importance)
+DELETE /api/v1/memories/:id          Delete memory + Qdrant vector
+POST  /api/v1/memories/search        Semantic search {query, top_k, min_score}
 ```
+
+### Voice ✅
+```
+POST /api/v1/voice/upload           Multipart: audio + conversation_id → 202 { session_id }
+GET  /api/v1/voice/sessions/:id     Poll for transcript { status, transcript }
+GET  /api/v1/voice/sessions         List recent sessions
+```
+
+### Agents ✅
+```
+POST  /api/v1/agents          Create agent {name, type, model, system_prompt, tools_enabled, ...}
+GET   /api/v1/agents          List agents (paginated)
+GET   /api/v1/agents/:id      Get agent
+PATCH /api/v1/agents/:id      Update agent
+DELETE /api/v1/agents/:id     Soft-delete (is_active=false)
+
+# To use an agent, create a conversation with agent_id then send messages normally:
+POST  /api/v1/conversations   { "agent_id": "<uuid>" }
+POST  /api/v1/conversations/:id/messages  { "content": "..." }
+                              → chat is routed through the Eino runner
+```
+
+---
+
+## Environment Variables
+
+Minimum required to run each phase:
+
+| Variable | Phase | Description |
+|----------|-------|-------------|
+| `DB_PASSWORD` | 1 | Postgres password |
+| `JWT_SECRET` | 1 | Min 32 chars (`openssl rand -hex 32`) |
+| `GOOGLE_CLIENT_ID` | 1 | Google Cloud Console → OAuth 2.0 |
+| `GOOGLE_CLIENT_SECRET` | 1 | Google Cloud Console → OAuth 2.0 |
+| `OPENAI_API_KEY` | 2+ | Chat completions, embeddings, memory extraction |
+| `QDRANT_API_KEY` | 3+ | Required only for Qdrant Cloud (empty for local) |
+| `ANTHROPIC_API_KEY` | 5 | Claude — used in Eino agents (Phase 5) |
+
+See `.env.example` for all variables with defaults, or [PHASE4_CHANGES.md](PHASE4_CHANGES.md) for a full annotated reference.
 
 ---
 
@@ -168,10 +235,11 @@ POST  /api/v1/memories/search        Semantic search
 
 - **JWT**: HS256, 15-min access token, 7-day rotating refresh (SHA-256 hashed in DB)
 - **Qdrant isolation**: every search filters `payload.user_id` — users never see each other's data
+- **Memory isolation**: same pattern — all memory Qdrant searches filter by `user_id`
 - **OAuth CSRF**: state stored in Redis (10 min TTL), deleted on use
 - **Passwords**: bcrypt cost 10
 - **Presigned URLs**: MinIO 24h URLs — backend never proxies file downloads
-- **Error logging**: 5xx errors log the cause server-side; clients only see generic message
+- **Error logging**: 5xx errors log the cause server-side; clients only see a generic message
 
 ---
 
@@ -181,6 +249,7 @@ POST  /api/v1/memories/search        Semantic search
 |------|----------|
 | [JARVAS.md](JARVAS.md) | Full developer guide: architecture, all APIs, env vars, coding conventions |
 | [PHASES.md](PHASES.md) | Phase-by-phase build checklist with exact files, code, and curl tests |
+| [PHASE4_CHANGES.md](PHASE4_CHANGES.md) | Phase 4 change log: all new/modified files + third-party API setup guide |
 
 ---
 
@@ -188,9 +257,9 @@ POST  /api/v1/memories/search        Semantic search
 
 When a module needs to scale independently:
 
-1. `document` + `rag` — I/O and GPU heavy, extract first
+1. `document` + `rag` — I/O and CPU heavy, extract first
 2. `voice` — Whisper needs GPU nodes
-3. `workflow` — stateful long-running, add Temporal
+3. `workflow` — stateful, long-running, add Temporal
 4. `agent` — compute-heavy, independent replicas
 5. `billing` — compliance boundary
 

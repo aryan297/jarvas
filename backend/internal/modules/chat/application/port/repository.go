@@ -20,3 +20,16 @@ type MessageRepository interface {
 	FindByConversationID(ctx context.Context, convID uuid.UUID, limit, offset int) ([]*entity.Message, error)
 	CountByConversationID(ctx context.Context, convID uuid.UUID) (int64, error)
 }
+
+// MemoryRetriever is implemented by the memory module service.
+// Defined here to avoid an import cycle between chat and memory packages.
+type MemoryRetriever interface {
+	SearchRelevant(ctx context.Context, userID uuid.UUID, query string, limit int) ([]string, error)
+}
+
+// AgentRunnerPort is implemented by agent.RunnerService.
+// Defined here to avoid an import cycle between chat and agent packages.
+type AgentRunnerPort interface {
+	RunMessage(ctx context.Context, agentID, userID uuid.UUID, userMsg string, history []entity.Message) (string, error)
+	StreamMessage(ctx context.Context, agentID, userID uuid.UUID, userMsg string, history []entity.Message) (<-chan string, error)
+}

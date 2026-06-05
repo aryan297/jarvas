@@ -19,9 +19,10 @@ import (
 	authsvc       "github.com/jarvas/backend/internal/modules/auth/application/service"
 
 	// Chat
-	chathttp "github.com/jarvas/backend/internal/modules/chat/delivery/http"
-	chatrepo "github.com/jarvas/backend/internal/modules/chat/infrastructure/repository"
-	chatsvc  "github.com/jarvas/backend/internal/modules/chat/application/service"
+	chathttp  "github.com/jarvas/backend/internal/modules/chat/delivery/http"
+	chatevent "github.com/jarvas/backend/internal/modules/chat/domain/event"
+	chatrepo  "github.com/jarvas/backend/internal/modules/chat/infrastructure/repository"
+	chatsvc   "github.com/jarvas/backend/internal/modules/chat/application/service"
 
 	// Document
 	dochttp    "github.com/jarvas/backend/internal/modules/document/delivery/http"
@@ -31,10 +32,31 @@ import (
 	docevent   "github.com/jarvas/backend/internal/modules/document/domain/event"
 
 	// RAG
-	raghttp    "github.com/jarvas/backend/internal/modules/rag/delivery/http"
+	raghttp      "github.com/jarvas/backend/internal/modules/rag/delivery/http"
 	ragembedding "github.com/jarvas/backend/internal/modules/rag/infrastructure/embedding"
-	ragvector  "github.com/jarvas/backend/internal/modules/rag/infrastructure/vectorstore"
-	ragsvc     "github.com/jarvas/backend/internal/modules/rag/application/service"
+	ragvector    "github.com/jarvas/backend/internal/modules/rag/infrastructure/vectorstore"
+	ragsvc       "github.com/jarvas/backend/internal/modules/rag/application/service"
+
+	// Memory
+	memhttp "github.com/jarvas/backend/internal/modules/memory/delivery/http"
+	memrepo "github.com/jarvas/backend/internal/modules/memory/infrastructure/repository"
+	memsvc  "github.com/jarvas/backend/internal/modules/memory/application/service"
+
+	// Agent
+	agenthttp "github.com/jarvas/backend/internal/modules/agent/delivery/http"
+	agentrepo "github.com/jarvas/backend/internal/modules/agent/infrastructure/repository"
+	agentsvc  "github.com/jarvas/backend/internal/modules/agent/application/service"
+
+	// Tools
+	toolsvc       "github.com/jarvas/backend/internal/modules/tool/application/service"
+	toolexecutors "github.com/jarvas/backend/internal/modules/tool/infrastructure/executors"
+
+	// Voice
+	voicehttp        "github.com/jarvas/backend/internal/modules/voice/delivery/http"
+	voicecache       "github.com/jarvas/backend/internal/modules/voice/infrastructure/cache"
+	voicestorage     "github.com/jarvas/backend/internal/modules/voice/infrastructure/storage"
+	voicetranscript  "github.com/jarvas/backend/internal/modules/voice/infrastructure/transcription"
+	voicesvc         "github.com/jarvas/backend/internal/modules/voice/application/service"
 
 	// Shared
 	"github.com/jarvas/backend/internal/shared/cache"
@@ -111,10 +133,8 @@ func main() {
 	chunkRepository := docrepo.NewChunkRepository(db.Pool)
 
 	processor := ragsvc.NewProcessor(docRepository, chunkRepository, minioStorage, embedder, qdrantStore, bus)
-
-	// Ensure Qdrant collections exist.
 	if err := processor.EnsureCollection(ctx); err != nil {
-		logger.Fatal("qdrant ensure collection failed", zap.Error(err))
+		logger.Fatal("qdrant ensure collection (documents) failed", zap.Error(err))
 	}
 
 	documentService := docsvc.NewDocumentService(docRepository, chunkRepository, minioStorage, bus)
@@ -123,21 +143,69 @@ func main() {
 	ragService := ragsvc.NewRAGService(embedder, qdrantStore)
 	ragHandler  := raghttp.NewRAGHandler(ragService)
 
+	// ── Module: Memory ────────────────────────────────────────────────────────
+
+	memRepository := memrepo.NewMemoryRepository(db.Pool)
+	memoryService := memsvc.NewMemoryService(
+		memRepository, embedder, qdrantStore,
+		cfg.AI.OpenAIKey, cfg.AI.Model,
+	)
+	if err := memoryService.EnsureCollection(ctx); err != nil {
+		logger.Fatal("qdrant ensure collection (memory) failed", zap.Error(err))
+	}
+	chatService.SetMemoryRetriever(memoryService)
+	memoryHandler := memhttp.NewMemoryHandler(memoryService)
+
+	// ── Module: Tools ─────────────────────────────────────────────────────────
+
+	toolRegistry := toolsvc.NewRegistry()
+	toolRegistry.Register(toolexecutors.WebSearchDef())
+	toolRegistry.Register(toolexecutors.CalculatorDef())
+
+	// ── Module: Agent ─────────────────────────────────────────────────────────
+
+	agentRepository := agentrepo.NewAgentRepository(db.Pool)
+	agentService    := agentsvc.NewAgentService(agentRepository)
+	runnerService   := agentsvc.NewRunnerService(agentRepository, toolRegistry, cfg.AI.OpenAIKey)
+	runnerService.SetMemoryRetriever(memoryService)
+
+	// Wire agent runner into chat so agent conversations use Eino.
+	chatService.SetAgentRunner(runnerService)
+
+	agentHandler := agenthttp.NewAgentHandler(agentService)
+
+	// ── Module: Voice ─────────────────────────────────────────────────────────
+
+	audioStorage, err := voicestorage.NewMinIOAudioStorage(cfg.MinIO)
+	if err != nil {
+		logger.Fatal("minio audio storage failed", zap.Error(err))
+	}
+
+	whisper       := voicetranscript.NewWhisperTranscriber(cfg.AI.OpenAIKey)
+	sessionStore  := voicecache.NewRedisSessionStore(redisClient)
+	voiceService  := voicesvc.NewVoiceService(sessionStore, audioStorage, whisper)
+	voiceHandler  := voicehttp.NewVoiceHandler(voiceService)
+
 	// ── Event subscriptions ───────────────────────────────────────────────────
 
-	// DocumentUploaded → trigger async RAG processing
 	bus.Subscribe(docevent.EvtDocumentUploaded, func(ctx context.Context, e eventbus.Event) {
 		evt := e.(docevent.DocumentUploaded)
 		go processor.ProcessDocument(ctx, evt.DocumentID, evt.UserID)
 	})
 
-	// DocumentDeleted → clean up Qdrant vectors
 	bus.Subscribe(docevent.EvtDocumentDeleted, func(ctx context.Context, e eventbus.Event) {
 		evt := e.(docevent.DocumentDeleted)
 		go func() {
 			_ = qdrantStore.DeleteByFilter(ctx, ragsvc.CollectionDocuments, map[string]string{
 				"document_id": evt.DocumentID.String(),
 			})
+		}()
+	})
+
+	bus.Subscribe(chatevent.EvtChatCompleted, func(ctx context.Context, e eventbus.Event) {
+		evt := e.(chatevent.ChatCompleted)
+		go func() {
+			_ = memoryService.Extract(ctx, evt.UserID, evt.UserMsg, evt.AssistMsg)
 		}()
 	})
 
@@ -178,6 +246,9 @@ func main() {
 	chathttp.RegisterRoutes(v1, chatHandler, authMW)
 	dochttp.RegisterRoutes(v1, documentHandler, authMW)
 	raghttp.RegisterRoutes(v1, ragHandler, authMW)
+	memhttp.RegisterRoutes(v1, memoryHandler, authMW)
+	agenthttp.RegisterRoutes(v1, agentHandler, authMW)
+	voicehttp.RegisterRoutes(v1, voiceHandler, authMW)
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 
