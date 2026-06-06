@@ -49,7 +49,22 @@ import (
 
 	// Tools
 	toolsvc       "github.com/jarvas/backend/internal/modules/tool/application/service"
+	toolhttp      "github.com/jarvas/backend/internal/modules/tool/delivery/http"
 	toolexecutors "github.com/jarvas/backend/internal/modules/tool/infrastructure/executors"
+	toolrepo      "github.com/jarvas/backend/internal/modules/tool/infrastructure/repository"
+
+	// Workflow
+	workflowhttp      "github.com/jarvas/backend/internal/modules/workflow/delivery/http"
+	workflowengine    "github.com/jarvas/backend/internal/modules/workflow/infrastructure/engine"
+	workflowrepo      "github.com/jarvas/backend/internal/modules/workflow/infrastructure/repository"
+	workflowscheduler "github.com/jarvas/backend/internal/modules/workflow/infrastructure/scheduler"
+	workflowsvc       "github.com/jarvas/backend/internal/modules/workflow/application/service"
+
+	// Tenant
+	tenanthttp "github.com/jarvas/backend/internal/modules/tenant/delivery/http"
+	tenantrepo "github.com/jarvas/backend/internal/modules/tenant/infrastructure/repository"
+	tenantsvc  "github.com/jarvas/backend/internal/modules/tenant/application/service"
+	authevent  "github.com/jarvas/backend/internal/modules/auth/domain/event"
 
 	// Voice
 	voicehttp        "github.com/jarvas/backend/internal/modules/voice/delivery/http"
@@ -161,6 +176,12 @@ func main() {
 	toolRegistry := toolsvc.NewRegistry()
 	toolRegistry.Register(toolexecutors.WebSearchDef())
 	toolRegistry.Register(toolexecutors.CalculatorDef())
+	toolRegistry.Register(toolexecutors.HTTPRequestDef())
+
+	// Tool DB repositories + HTTP API
+	toolRepository       := toolrepo.NewToolRepository(db.Pool)
+	toolConfigRepository := toolrepo.NewUserToolConfigRepository(db.Pool)
+	toolHandler          := toolhttp.NewToolHandler(toolRepository, toolConfigRepository)
 
 	// ── Module: Agent ─────────────────────────────────────────────────────────
 
@@ -186,6 +207,27 @@ func main() {
 	voiceService  := voicesvc.NewVoiceService(sessionStore, audioStorage, whisper)
 	voiceHandler  := voicehttp.NewVoiceHandler(voiceService)
 
+	// ── Module: Workflow ──────────────────────────────────────────────────────
+
+	wfRepository  := workflowrepo.NewWorkflowRepository(db.Pool)
+	runRepository := workflowrepo.NewRunRepository(db.Pool)
+	dagExecutor   := workflowengine.NewDAGExecutor(runRepository, toolRegistry, cfg.AI.OpenAIKey, cfg.AI.Model)
+	wfService     := workflowsvc.NewWorkflowService(wfRepository, runRepository, dagExecutor)
+	wfScheduler   := workflowscheduler.New(wfRepository, wfService)
+	wfHandler     := workflowhttp.NewWorkflowHandler(wfService)
+
+	if err := wfScheduler.Start(ctx); err != nil {
+		logger.Warn("workflow scheduler start failed", zap.Error(err))
+	}
+	defer wfScheduler.Stop()
+
+	// ── Module: Tenant ────────────────────────────────────────────────────────
+
+	tenantRepository := tenantrepo.NewTenantRepository(db.Pool)
+	memberRepository := tenantrepo.NewMemberRepository(db.Pool)
+	tenantService    := tenantsvc.NewTenantService(tenantRepository, memberRepository)
+	tenantHandler    := tenanthttp.NewTenantHandler(tenantService)
+
 	// ── Event subscriptions ───────────────────────────────────────────────────
 
 	bus.Subscribe(docevent.EvtDocumentUploaded, func(ctx context.Context, e eventbus.Event) {
@@ -206,6 +248,14 @@ func main() {
 		evt := e.(chatevent.ChatCompleted)
 		go func() {
 			_ = memoryService.Extract(ctx, evt.UserID, evt.UserMsg, evt.AssistMsg)
+		}()
+	})
+
+	// UserRegistered → auto-create personal tenant
+	bus.Subscribe(authevent.EvtUserRegistered, func(ctx context.Context, e eventbus.Event) {
+		evt := e.(authevent.UserRegistered)
+		go func() {
+			_, _ = tenantService.CreatePersonalTenant(ctx, evt.UserID, evt.FullName)
 		}()
 	})
 
@@ -249,6 +299,9 @@ func main() {
 	memhttp.RegisterRoutes(v1, memoryHandler, authMW)
 	agenthttp.RegisterRoutes(v1, agentHandler, authMW)
 	voicehttp.RegisterRoutes(v1, voiceHandler, authMW)
+	toolhttp.RegisterRoutes(v1, toolHandler, authMW)
+	workflowhttp.RegisterRoutes(v1, wfHandler, authMW)
+	tenanthttp.RegisterRoutes(v1, tenantHandler, authMW)
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 

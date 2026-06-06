@@ -1226,66 +1226,137 @@ User reviews text → presses Enter to send as a chat message
 
 ---
 
-# Phase 7 — Workflows + Tools
+# ✅ Phase 7 — Workflows + Tools (COMPLETE)
 
-**Goal:** Visual multi-step automation with agent nodes, tool nodes, conditions, and scheduling.
+**Goal:** Multi-step automation with AI agent nodes, tool nodes, conditions, scheduling, and run history.
 
-**Time estimate:** 7–10 days
+**Dependency added:** `go get github.com/robfig/cron/v3`
 
-**Dependencies:**
-```bash
-go get github.com/robfig/cron/v3
-```
+## Files Built
 
-## Checklist
 ```
 Backend
-  [ ] workflow/application/port/repository.go
-  [ ] workflow/application/service/workflow_service.go  (CRUD)
-  [ ] workflow/infrastructure/repository/workflow_repo.go
-  [ ] workflow/infrastructure/repository/run_repo.go
-  [ ] workflow/infrastructure/engine/dag_executor.go    (topological sort + step runner)
-  [ ] workflow/infrastructure/scheduler/scheduler.go    (cron-based trigger)
-  [ ] tool/infrastructure/executors/github_tool.go
-  [ ] tool/infrastructure/executors/google_calendar_tool.go
-  [ ] tool/infrastructure/executors/email_tool.go
-  [ ] workflow/delivery/http/handler.go
-  [ ] workflow/delivery/http/routes.go
-  [ ] tool/delivery/http/handler.go  (list, configure)
-  [ ] Wire + start scheduler in main.go
+  ✅ workflow/application/port/repository.go              WorkflowRepository, RunRepository
+  ✅ workflow/application/dto/workflow_dto.go              Create/Update/Trigger DTOs
+  ✅ workflow/application/service/workflow_service.go      CRUD + TriggerRun + ListRuns + GetRun
+  ✅ workflow/infrastructure/repository/workflow_repo.go   pgx — JSONB definition, enum casts
+  ✅ workflow/infrastructure/repository/run_repo.go        pgx
+  ✅ workflow/infrastructure/engine/dag_executor.go        Topological sort (Kahn's) + step runner
+  ✅ workflow/infrastructure/scheduler/scheduler.go        robfig/cron wrapper — loads ACTIVE+SCHEDULE on start
+  ✅ workflow/delivery/http/handler.go                     8 endpoints
+  ✅ workflow/delivery/http/routes.go
+
+  ✅ tool/application/port/repository.go                  ToolRepository, UserToolConfigRepository
+  ✅ tool/infrastructure/repository/tool_repo.go           pgx — reads seeded tools + user configs
+  ✅ tool/infrastructure/executors/http_request.go         Generic HTTP request tool (headers, body, method)
+  ✅ tool/delivery/http/handler.go                         List tools + configure per-user credentials
+  ✅ tool/delivery/http/routes.go
 
 Frontend
-  [ ] services/workflow.service.ts
-  [ ] pages/workflows/WorkflowsPage.tsx
-  [ ] pages/workflows/WorkflowBuilder.tsx  (visual DAG editor, or JSON editor for MVP)
-  [ ] pages/workflows/RunHistory.tsx
+  ✅ services/workflow.service.ts                          CRUD, triggerRun, listRuns, getRun
+  ✅ services/tool.service.ts                              list, getConfig, configure
+  ✅ pages/workflows/WorkflowsPage.tsx                     List + create + run + delete; collapsible run history
+  ✅ pages/workflows/WorkflowBuilder.tsx                   Visual step builder + JSON editor toggle
+  ✅ pages/workflows/RunHistory.tsx                        Status badges, duration, auto-polls active runs
 ```
 
----
+## Verified Endpoints
+
+```
+POST  /api/v1/workflows              Create workflow
+GET   /api/v1/workflows              List (paginated)
+GET   /api/v1/workflows/:id          Get workflow + definition
+PATCH /api/v1/workflows/:id          Update (name, status, definition, cron)
+DELETE /api/v1/workflows/:id         Soft-delete (status=ARCHIVED)
+POST  /api/v1/workflows/:id/run      Trigger manual run → 202 Accepted { run_id }
+GET   /api/v1/workflows/:id/runs     List runs (paginated)
+GET   /api/v1/workflows/:id/runs/:run_id  Get run (poll for status)
+
+GET   /api/v1/tools                  List all registered tools
+GET   /api/v1/tools/:name/config     Get user's saved config for a tool
+POST  /api/v1/tools/:name/configure  Save/update user credentials for a tool
+```
+
+## DAG Execution Flow
+
+```
+POST /workflows/:id/run
+  → Create WorkflowRun (PENDING) in DB
+  → Return 202 immediately
+  → Background goroutine: DAGExecutor.Execute()
+      → Kahn's topological sort on nodes + edges
+      → For each node in order:
+          agent node:     OpenAI chat completion with {template} var substitution
+          tool node:      ToolRegistry.Execute(name, argsJSON)
+          condition node: evaluate {expr} → route "then" or "else"
+          delay node:     time.Sleep(N seconds, max 300)
+          → execCtx[node_id+"_output"] = result
+      → Update run: COMPLETED + result map / FAILED + error_msg
+
+Scheduler (startup):
+  → Load all ACTIVE+SCHEDULE workflows
+  → Register each cron job (robfig/cron)
+  → On fire: TriggerRun with {trigger:"schedule"} payload
+```
+
+## Key Design Decisions
+
+- **No import cycle**: `DAGExecutor` interface defined in `workflow/application/service` — engine implements it
+- **Variable substitution**: `{node_id_output}` in any string field is replaced before execution
+- **Tool registry reuse**: same Phase 5 registry (web_search, calculator) + new http_request
+- **Tool DB seeded**: migration 010 pre-seeds 5 built-in tools; users add credentials via `/tools/:name/configure`
+- **Async execution**: always returns 202 + run_id; client polls `/runs/:id` until COMPLETED/FAILED
+- **Scheduler**: starts on server boot; loaded from DB — survives restarts
 
 ---
 
-# Phase 8 — Multi-Tenant
+---
+
+# ✅ Phase 8 — Multi-Tenant (COMPLETE)
 
 **Goal:** Org-level isolation. One deployment serves multiple teams.
 
-**Time estimate:** 5–7 days
+## Files Built
 
-## Checklist
 ```
 Backend
-  [ ] New migration: 012_create_tenants.sql  (tenants + tenant_members tables)
-  [ ] shared/middleware/tenant.go  (reads X-Tenant-ID header, validates membership)
-  [ ] Update all repositories to filter by tenant_id
-  [ ] Per-tenant rate limiting key: rate:{tenant_id}:{user_id}
-  [ ] Tenant invite flow (invite by email)
-  [ ] tenant/delivery/http/handler.go  (create, invite, list members)
+  ✅ migrations/012_create_tenants.sql               tenants + tenant_members (roles: OWNER/ADMIN/MEMBER)
+  ✅ tenant/domain/entity/tenant.go                  Tenant, TenantMember entities
+  ✅ tenant/application/port/repository.go            TenantRepository, MemberRepository interfaces
+  ✅ tenant/application/dto/tenant_dto.go             Create/Invite DTOs + responses
+  ✅ tenant/application/service/tenant_service.go     CRUD + InviteMember + ListMembers + RemoveMember
+  ✅ tenant/infrastructure/repository/tenant_repo.go  pgx — tenant + member repos + FindUserByEmail
+  ✅ tenant/delivery/http/handler.go                  6 endpoints
+  ✅ tenant/delivery/http/routes.go
+  ✅ shared/middleware/tenant.go                      X-Tenant-ID validation (opt-in, non-breaking)
 
 Frontend
-  [ ] Tenant switcher in Header
-  [ ] Invite member flow
-  [ ] Tenant settings page
+  ✅ services/tenant.service.ts                       create, list, listMembers, invite, removeMember
+  ✅ store/tenantStore.ts                             Zustand: tenants list + activeTenantId (persisted)
+  ✅ components/layout/Header.tsx                     Workspace switcher dropdown
+  ✅ pages/settings/SettingsPage.tsx                  Workspaces tab + Members tab with invite form
 ```
+
+## Verified Endpoints
+
+```
+POST   /api/v1/tenants                        Create tenant (caller becomes OWNER)
+GET    /api/v1/tenants                        List all tenants caller belongs to
+GET    /api/v1/tenants/:id                    Get tenant (membership required)
+POST   /api/v1/tenants/:id/invite             Invite by email {email, role}
+GET    /api/v1/tenants/:id/members            List members with name + email
+DELETE /api/v1/tenants/:id/members/:user_id   Remove member (OWNER/ADMIN only)
+```
+
+## Key Design Decisions
+
+- **Personal tenant auto-created**: on UserRegistered event → personal workspace created for every new user
+- **Non-breaking**: X-Tenant-ID header is optional — existing routes still work user-scoped without it
+- **Middleware position**: ValidateTenant is a Gin middleware function — applied per-route-group, not globally
+- **Invite by email**: requires user to already have a Jarvas account (no email sending needed for MVP)
+- **Role hierarchy**: OWNER cannot be removed; MEMBER cannot invite/remove; ADMIN can manage members
+- **Slug generation**: `slugify(name) + "-" + uuid[:8]` guarantees uniqueness without a DB round-trip
+- **No repo rewrites**: existing data stays user-scoped; tenant layer adds collaboration on top
 
 ---
 

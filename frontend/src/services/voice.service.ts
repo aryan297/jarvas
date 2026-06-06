@@ -1,16 +1,9 @@
 import { apiClient } from './api'
 import { useAuthStore } from '@/store/authStore'
-import type { ApiResponse } from '@/types/api'
+import type { ApiResponse, VoiceSession } from '@/types/api'
 
-export interface VoiceSession {
-  id: string
-  conversation_id: string
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED'
-  transcript?: string
-  duration_seconds?: number
-  language_code?: string
-  created_at: string
-}
+// Re-export canonical type
+export type { VoiceSession }
 
 export interface UploadVoiceResponse {
   session_id: string

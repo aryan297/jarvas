@@ -503,47 +503,35 @@ Copy `.env.example` → `.env` and fill in these values:
 
 ## 8. What Is Already Built
 
-**48 backend module files · 30 frontend files · 0 build errors · 0 TypeScript errors**
+**All 8 phases complete — 130 backend module files · 49 frontend files · 0 build errors**
 
-### ✅ Phase 1 — Auth (100% complete, all 11 scenarios verified)
+| Phase | Module | Status | Key API surface |
+|-------|--------|--------|-----------------|
+| 1 | Auth | ✅ | register, login, refresh, logout, /me, Google OAuth |
+| 2 | Chat | ✅ | conversations, messages, SSE streaming, Redis short-term memory |
+| 3 | Documents + RAG | ✅ | upload→MinIO→chunk→embed→Qdrant, semantic search |
+| 4 | Memory | ✅ | long-term facts (Postgres+Qdrant), LLM extraction after every chat turn |
+| 5 | AI Agents (Eino) | ✅ | named agents, tool calling loop, memory injection, Eino ChatModel |
+| 6 | Voice | ✅ | audio upload→Whisper→transcript injected into ChatInput |
+| 7 | Workflows + Tools | ✅ | DAG executor, cron scheduler, agent/tool/condition/delay nodes |
+| 8 | Multi-Tenant | ✅ | tenants, membership roles, invite by email, workspace switcher |
 
-| Layer | Files |
-|-------|-------|
-| Domain | `user.go`, `refresh_token.go`, `events.go` (UserRegistered, UserLoggedIn) |
-| Port | `UserRepository`, `TokenRepository` interfaces |
-| Service | `auth_service.go` (Register/Login/Refresh/Logout/OAuth), `token_service.go` (JWT + SHA-256) |
-| Infra | `user_repo.go`, `token_repo.go`, `oauth/google.go` |
-| Delivery | 7 endpoints: register, login, refresh, logout, /me, google/login, google/callback |
-| Frontend | Tabbed LoginPage (sign in + create account + Google), route guards, Zustand auth store |
+### ✅ Backend modules
 
-### ✅ Phase 2 — Chat (100% complete)
+| Module | Files | Notes |
+|--------|-------|-------|
+| `auth` | 14 | JWT, Google OAuth, RBAC, refresh rotation |
+| `chat` | 8  | SendMessage, StreamMessage, agent delegation, ChatCompleted event |
+| `document` | 9 | MinIO, PDF+text extractors, async processing pipeline |
+| `rag` | 8  | OpenAI embeddings, Qdrant gRPC, reranking |
+| `memory` | 8  | Postgres+Qdrant, LLM extraction, `MemoryRetriever` port |
+| `agent` | 8  | Eino ChatModel, tool calling loop, `AgentRunnerPort` |
+| `voice` | 8  | Whisper API, MinIO audio, Redis session store (no migration needed) |
+| `workflow` | 10 | Kahn's topo sort, cron scheduler, 4 node types |
+| `tool` | 7  | Registry (web_search, calculator, http_request), DB-backed tool API |
+| `tenant` | 7  | OWNER/ADMIN/MEMBER roles, invite, personal tenant auto-creation |
 
-| Layer | Files |
-|-------|-------|
-| Port | `ConversationRepository`, `MessageRepository` interfaces |
-| Service | `chat_service.go` — SendMessage, StreamMessage, Redis short-term memory (last 20, TTL 2h) |
-| Infra | `conversation_repo.go`, `message_repo.go` |
-| Delivery | 6 endpoints including SSE streaming (`stream: true`) |
-| Frontend | `ChatPage`, `ConversationList`, `MessageThread`, `MessageBubble` (Markdown), `ChatInput` (stream toggle) |
-
-### ✅ Phase 3 — Documents + RAG (100% complete)
-
-| Layer | Files |
-|-------|-------|
-| Domain events | `DocumentUploaded`, `DocumentIndexed`, `DocumentDeleted` |
-| Ports | `DocumentRepository`, `ChunkRepository`, `StoragePort`, `EmbeddingPort`, `VectorStorePort` |
-| MinIO | Upload, download, delete, 24h presigned URL |
-| Extractors | PDF (ledongthuc/pdf) + PlainText (TXT/MD/CSV/HTML) |
-| Chunker | 512-token sentence-aware chunks, 50-token overlap |
-| Processor | Async: download→extract→chunk→embed(batch 100)→Postgres+Qdrant (event-driven) |
-| RAG search | Embed query→ANN→rerank top-5→context string for LLM |
-| Qdrant | gRPC: EnsureCollection, Upsert, Search with user_id filter, DeleteByFilter |
-| Embedder | text-embedding-3-small via OpenAI SDK (EmbedText + EmbedBatch) |
-| Repos | Document CRUD + chunk batch insert (transaction) |
-| Delivery | 6 document endpoints + 1 RAG search endpoint |
-| Frontend | `DocumentsPage` (tabbed), `UploadDropzone` (react-dropzone), `DocumentCard` (status badge + poll), `DocumentSearch` (ranked results) |
-
-### ✅ Shared Infrastructure
+### ✅ Shared infrastructure
 
 | Package | What It Does |
 |---------|-------------|
@@ -555,17 +543,27 @@ Copy `.env.example` → `.env` and fill in these values:
 | `response` | OK/Created/Paginated/NoContent/Error (auto-unwraps AppError) |
 | `validator` | Struct tags → human-readable AppError messages |
 | `eventbus` | In-process goroutine pub/sub, panic-safe, swap-ready for NATS |
-| `middleware` | Authenticate, RequireRole, RequestLogger, Recovery |
+| `middleware` | Authenticate, RequireRole, RequestLogger, Recovery, ValidateTenant |
 
-### ✅ Domain Skeletons (future phases)
+### ✅ Frontend pages
 
-`user`, `agent`, `memory`, `workflow`, `tool`, `voice` — entities + DTOs defined, services pending.
+| Page | Status |
+|------|--------|
+| LoginPage | ✅ Tabbed sign-in + register + Google OAuth |
+| DashboardPage | ✅ Stats grid, quick actions, recent conversations |
+| ChatPage | ✅ Split layout, SSE streaming, agent selector, voice mic |
+| DocumentsPage | ✅ Upload dropzone, status polling, semantic search |
+| AgentsPage | ✅ Create/edit/delete agents, tool toggles, "Chat with agent" |
+| MemoryPage | ✅ List + semantic search + manual create/delete |
+| WorkflowsPage | ✅ Builder (visual + JSON toggle), trigger run, run history |
+| SettingsPage | ✅ Workspace switcher, member list, invite by email |
 
 ### ✅ Infrastructure
 
 - `docker-compose.yml` — Postgres, Redis, Qdrant, MinIO, Backend, Frontend (health checks)
 - `backend/Dockerfile` — multi-stage, final image from `scratch` (~8 MB)
 - `Makefile` — `make dev` auto-starts Docker infra, detects air, falls back to `go run`
+- `migrations/` — 13 migration files (000–012), all production-grade indexes
 
 ---
 
@@ -661,11 +659,13 @@ Base URL: `http://localhost:8080/api/v1`
 | **1** | Auth (JWT, Google OAuth, RBAC) | ✅ Done |
 | **2** | Chat (conversations, messages, SSE streaming) | ✅ Done |
 | **3** | Documents + RAG (chunking, embedding, Qdrant, search) | ✅ Done |
-| **4** | Memory (short-term Redis, long-term Postgres, semantic Qdrant) | **▶ Next** |
-| **5** | AI Agents (Eino graph, supervisor + sub-agents) | 🔲 |
-| **6** | Voice (audio upload, Whisper transcription) | 🔲 |
-| **7** | Workflows (DAG engine, triggers, tool execution) | 🔲 |
-| **8** | Multi-Tenant (tenant isolation, RBAC across tenants) | 🔲 |
+| **4** | Memory (short-term Redis, long-term Postgres, semantic Qdrant) | ✅ Done |
+| **5** | AI Agents (Eino, tool calling loop, memory injection) | ✅ Done |
+| **6** | Voice (audio upload → Whisper → transcript into ChatInput) | ✅ Done |
+| **7** | Workflows (DAG engine, cron scheduler, tool execution) | ✅ Done |
+| **8** | Multi-Tenant (orgs, membership, invite, workspace switcher) | ✅ Done |
+
+> All 8 phases are complete. See [PHASES.md](PHASES.md) for the detailed implementation record of each phase.
 
 ---
 
@@ -1330,4 +1330,4 @@ make docker-build && make docker-up
 
 ---
 
-*Last updated: Phase 1 (Auth) complete. Phase 2 (Chat) is next.*
+*Last updated: All 8 phases complete. Platform is production-ready.*

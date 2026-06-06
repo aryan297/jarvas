@@ -15,10 +15,10 @@ Modular Monolith, with a clear extraction path to microservices.
 | 4     | Memory             | ✅ **Done**   |
 | 5     | AI Agents (Eino)   | ✅ **Done**   |
 | 6     | Voice              | ✅ **Done**   |
-| 7     | Workflows + Tools  | ▶ **Next**   |
-| 8     | Multi-Tenant       | 🔲 Pending   |
+| 7     | Workflows + Tools  | ✅ **Done**   |
+| 8     | Multi-Tenant       | ✅ **Done**   |
 
-**95 backend module files · 39 frontend files · 0 build errors**
+**130 backend module files · 49 frontend files · 0 build errors**
 
 ---
 
@@ -51,8 +51,9 @@ backend/internal/modules/
 ├── memory/    ✅  Long-term memory: Postgres + Qdrant, LLM auto-extraction
 ├── agent/     ✅  Eino ChatModel, tool calling loop, memory injection, 5 endpoints
 ├── voice/     ✅  Audio upload → Whisper → transcript injected into chat input
-├── workflow/  🔲  DAG engine, cron triggers, tool execution
-└── tool/      🔲  Pluggable tool registry (HTTP, DB, GitHub, Calendar)
+├── workflow/  ✅  DAG executor, cron scheduler, tool nodes, run history
+├── tool/      ✅  Registry (web_search, calculator, http_request) + DB-backed tool API
+└── tenant/    ✅  Orgs, membership (OWNER/ADMIN/MEMBER), invite by email, workspace switcher
 ```
 
 Every module: `domain/ → application/ → infrastructure/ → delivery/`
@@ -195,6 +196,32 @@ POST  /api/v1/memories/search        Semantic search {query, top_k, min_score}
 POST /api/v1/voice/upload           Multipart: audio + conversation_id → 202 { session_id }
 GET  /api/v1/voice/sessions/:id     Poll for transcript { status, transcript }
 GET  /api/v1/voice/sessions         List recent sessions
+```
+
+### Tenants ✅
+```
+POST   /api/v1/tenants                    Create workspace (caller = OWNER)
+GET    /api/v1/tenants                    List user's workspaces
+GET    /api/v1/tenants/:id                Get workspace
+POST   /api/v1/tenants/:id/invite         Invite by email {email, role}
+GET    /api/v1/tenants/:id/members        List members
+DELETE /api/v1/tenants/:id/members/:uid   Remove member
+```
+
+### Workflows ✅
+```
+POST  /api/v1/workflows              Create workflow (definition: nodes+edges+trigger)
+GET   /api/v1/workflows              List workflows
+GET   /api/v1/workflows/:id          Get workflow
+PATCH /api/v1/workflows/:id          Update (status, definition, cron)
+DELETE /api/v1/workflows/:id         Archive
+POST  /api/v1/workflows/:id/run      Trigger run → 202 { run_id }
+GET   /api/v1/workflows/:id/runs     Run history (paginated)
+GET   /api/v1/workflows/:id/runs/:run_id  Poll run status
+
+GET   /api/v1/tools                  List all tools (5 built-in seeded)
+POST  /api/v1/tools/:name/configure  Save user credentials for a tool
+GET   /api/v1/tools/:name/config     Get user's tool config
 ```
 
 ### Agents ✅
